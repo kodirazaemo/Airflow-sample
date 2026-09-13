@@ -122,10 +122,13 @@ def get_commodities() -> dict:
 
 
 def _api_key() -> str:
-    key = os.environ.get('ALPHA_VANTAGE_API_KEY', '').strip()
+    key = (
+        os.environ.get('ALPHA_VANTAGE_API_KEY', '').strip()
+        or os.environ.get('ALPHA_VANTAGE_KEY', '').strip()
+    )
     if not key:
         raise ValueError(
-            'ALPHA_VANTAGE_API_KEY is not set. '
+            'ALPHA_VANTAGE_API_KEY (or ALPHA_VANTAGE_KEY) is not set. '
             'Get a free key at https://www.alphavantage.co/support/#api-key '
             'and export it (or set it in docker-compose / .env).'
         )
