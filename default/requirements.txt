@@ -1,0 +1,5 @@
+apache-airflow==2.8.1
+apache-airflow-providers-postgres==5.10.1
+psycopg2-binary==2.9.9
+redis==5.0.1
+flask-session==0.5.0

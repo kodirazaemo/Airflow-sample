@@ -1,0 +1,10 @@
+__pycache__
+*.pyc
+.git
+.env
+logs/
+*.egg-info
+dist
+build
+.DS_Store
+postgres_data/
