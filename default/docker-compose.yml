@@ -43,6 +43,9 @@ services:
       AIRFLOW__CORE__DAGS_FOLDER: /app/dags
       AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:-demo}
+      ALPHA_VANTAGE_INTERVAL: ${ALPHA_VANTAGE_INTERVAL:-monthly}
+      ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS: ${ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS:-15}
     ports:
       - "8080:8080"
     volumes:
@@ -66,6 +69,9 @@ services:
       AIRFLOW__CORE__DAGS_FOLDER: /app/dags
       AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:-demo}
+      ALPHA_VANTAGE_INTERVAL: ${ALPHA_VANTAGE_INTERVAL:-monthly}
+      ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS: ${ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS:-15}
     volumes:
       - ./dags:/app/dags
       - ./logs:/app/logs
