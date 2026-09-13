@@ -1,6 +1,6 @@
 # Airflow Sample Project
 
-A containerized Apache Airflow 2.8.1 setup with PostgreSQL, Redis, and a sample DAG.
+A containerized Apache Airflow 2.8.1 setup with PostgreSQL, Redis, and sample DAGs — including a commodity trading pipeline.
 
 ## Quick Start
 
@@ -29,9 +29,24 @@ docker compose down
 ├── entrypoint.sh          # Database init & admin user creation
 ├── requirements.txt       # Python dependencies
 ├── dags/
-│   └── sample_dag.py      # Example DAG with Python & Bash tasks
+│   ├── sample_dag.py      # Example DAG with Python & Bash tasks
+│   └── commodity_dag.py   # Commodity trading sample pipeline
 └── .dockerignore
 ```
+
+## Commodity Trading DAG (`commodity_dag.py`)
+
+Daily demo pipeline (`commodity_trading_dag`) that:
+
+1. **start_trading_session** — opens the session (Bash)
+2. **fetch_market_prices** — simulates EOD prices for gold, crude oil, wheat, copper, and natural gas
+3. **validate_market_data** — checks for missing/invalid quotes
+4. **compute_trading_signals** — BUY / SELL / HOLD from simple momentum rules
+5. **generate_trade_orders** — builds notional orders for actionable signals
+6. **publish_daily_report** — prints an end-of-day summary
+7. **close_trading_session** — closes the session (Bash)
+
+Prices are deterministic per logical date (good for demos/replays). No external market API is required.
 
 ## Services
 - **Airflow Webserver:** `http://localhost:8080`
