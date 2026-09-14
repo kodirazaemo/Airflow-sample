@@ -13,8 +13,12 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: admin:admin
     AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /app/simple_auth_manager_passwords.json.generated
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+    # Critical for Airflow 3 + Docker: scheduler/workers must reach the api-server
+    # container, not localhost (which would point at themselves).
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
     AIRFLOW__API__BASE_URL: http://localhost:8080
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:-commodity-sample-jwt-secret}
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
     ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:-demo}
     ALPHA_VANTAGE_KEY: ${ALPHA_VANTAGE_KEY:-}
     ALPHA_VANTAGE_INTERVAL: ${ALPHA_VANTAGE_INTERVAL:-monthly}

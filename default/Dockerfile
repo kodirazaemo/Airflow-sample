@@ -14,7 +14,10 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# bash + procps are required for LocalExecutor subprocesses and BashOperator.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
+    procps \
     libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -31,6 +34,7 @@ ENV AIRFLOW_HOME=/app
 ENV AIRFLOW__CORE__LOAD_EXAMPLES=false
 ENV AIRFLOW__CORE__EXECUTOR=LocalExecutor
 ENV AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS=admin:admin
+# Browser-facing URL (host machine). Task execution uses EXECUTION_API_SERVER_URL.
 ENV AIRFLOW__API__BASE_URL=http://localhost:8080
 
 EXPOSE 8080

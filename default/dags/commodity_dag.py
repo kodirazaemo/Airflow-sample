@@ -23,7 +23,6 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
 
-from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
 
@@ -795,6 +794,18 @@ def publish_daily_report(**context):
     return report
 
 
+def open_trading_session(**context):
+    """Session open marker (replaces BashOperator to avoid shell dependency)."""
+    print(f"Opening commodity trading session for {context['ds']} (Alpha Vantage)")
+    return {'session': 'open', 'trading_date': context['ds']}
+
+
+def close_trading_session(**context):
+    """Session close marker."""
+    print(f"Commodity trading session closed for {context['ds']}")
+    return {'session': 'closed', 'trading_date': context['ds']}
+
+
 with DAG(
     dag_id='commodity_trading_dag',
     default_args=default_args,
@@ -805,9 +816,9 @@ with DAG(
     tags=['commodity', 'trading', 'alpha-vantage', 'sample'],
 ) as dag:
 
-    start = BashOperator(
+    start = PythonOperator(
         task_id='start_trading_session',
-        bash_command='echo "Opening commodity trading session for {{ ds }} (Alpha Vantage)"',
+        python_callable=open_trading_session,
     )
 
     fetch_prices = PythonOperator(
@@ -835,9 +846,9 @@ with DAG(
         python_callable=publish_daily_report,
     )
 
-    end = BashOperator(
+    end = PythonOperator(
         task_id='close_trading_session',
-        bash_command='echo "Commodity trading session closed for {{ ds }}"',
+        python_callable=close_trading_session,
     )
 
     start >> fetch_prices >> validate_data >> compute_signals >> generate_orders >> publish_report >> end
