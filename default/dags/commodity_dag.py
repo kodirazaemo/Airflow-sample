@@ -23,9 +23,9 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
 
-from airflow import DAG
-from airflow.operators.bash import BashOperator
-from airflow.operators.python import PythonOperator
+from airflow.providers.standard.operators.bash import BashOperator
+from airflow.providers.standard.operators.python import PythonOperator
+from airflow.sdk import DAG
 
 default_args = {
     'owner': 'trading',
@@ -796,10 +796,11 @@ def publish_daily_report(**context):
 
 
 with DAG(
-    'commodity_trading_dag',
+    dag_id='commodity_trading_dag',
     default_args=default_args,
     description='Commodity trading pipeline using Alpha Vantage + weighted technical signals',
-    schedule_interval=timedelta(days=1),
+    start_date=datetime(2024, 1, 1),
+    schedule=timedelta(days=1),
     catchup=False,
     tags=['commodity', 'trading', 'alpha-vantage', 'sample'],
 ) as dag:

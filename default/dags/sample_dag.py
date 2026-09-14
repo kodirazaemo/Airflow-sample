@@ -1,31 +1,33 @@
 from datetime import datetime, timedelta
-from airflow import DAG
-from airflow.operators.python import PythonOperator
-from airflow.operators.bash import BashOperator
+
+from airflow.providers.standard.operators.bash import BashOperator
+from airflow.providers.standard.operators.python import PythonOperator
+from airflow.sdk import DAG
 
 default_args = {
     'owner': 'airflow',
     'depends_on_past': False,
-    'start_date': datetime(2024, 1, 1),
-    'email_on_failure': False,
-    'email_on_retry': False,
     'retries': 1,
     'retry_delay': timedelta(minutes=5),
 }
+
 
 def print_hello():
     print("Hello from Airflow!")
     return "Hello world"
 
+
 def print_goodbye():
     print("Goodbye from Airflow!")
     return "Goodbye world"
 
+
 with DAG(
-    'sample_dag',
+    dag_id='sample_dag',
     default_args=default_args,
     description='A simple sample DAG',
-    schedule_interval=timedelta(days=1),
+    start_date=datetime(2024, 1, 1),
+    schedule=timedelta(days=1),
     catchup=False,
     tags=['sample'],
 ) as dag:

@@ -1,12 +1,13 @@
 # Airflow Sample Project
 
-A containerized Apache Airflow 2.8.1 setup with PostgreSQL, Redis, and sample DAGs — including a commodity trading pipeline powered by Alpha Vantage.
+A containerized **Apache Airflow 3.3.1** (Python 3.12) setup with PostgreSQL, Redis, and sample DAGs — including a commodity trading pipeline powered by Alpha Vantage.
 
 ## Quick Start
 
 ### Prerequisites
 - Docker & Docker Compose
 - An [Alpha Vantage API key](https://www.alphavantage.co/support/#api-key) (free)
+- Local Python **3.12+** recommended for VS Code / local tooling (matches the container image)
 
 ### Configure Alpha Vantage
 ```bash
@@ -14,11 +15,11 @@ cp .env.example .env
 # Edit .env and set ALPHA_VANTAGE_API_KEY to your key
 ```
 
-`docker compose` reads `.env` automatically and passes the key into the webserver and scheduler.
+`docker compose` reads `.env` automatically and passes the key into Airflow services.
 
 ### Run
 ```bash
-docker compose up -d --pull always
+docker compose up -d --build
 ```
 
 Access Airflow at `http://localhost:8080`
@@ -33,11 +34,11 @@ docker compose down
 ## Project Structure
 ```
 .
-├── Dockerfile              # Multi-stage build for Airflow
-├── docker-compose.yml      # Services: webserver, scheduler, postgres, redis
-├── entrypoint.sh           # Database init & admin user creation
+├── Dockerfile              # Multi-stage build (Python 3.12 + Airflow 3.3.1)
+├── docker-compose.yml      # api-server, scheduler, dag-processor, postgres, redis
+├── entrypoint.sh           # DB migrate + Simple Auth Manager bootstrap
 ├── requirements.txt        # Python dependencies
-├── .env.example            # Alpha Vantage config template
+├── .env.example            # Alpha Vantage / signal config template
 ├── dags/
 │   ├── sample_dag.py       # Example DAG with Python & Bash tasks
 │   └── commodity_dag.py    # Commodity trading sample pipeline
@@ -88,18 +89,27 @@ Free-tier keys are limited (~5 requests/minute). The fetch task pauses between c
 Use your own free API key for full coverage (including gold). The public `demo` key only works for a subset of commodity endpoints.
 
 ## Services
-- **Airflow Webserver:** `http://localhost:8080`
+- **Airflow API server (UI):** `http://localhost:8080`
 - **PostgreSQL:** `localhost:5432` (airflow/airflow)
 - **Redis:** `localhost:6379`
-- **Airflow Scheduler:** Runs DAG scheduling
+- **Airflow Scheduler:** schedules Dag runs
+- **Airflow Dag processor:** parses Dag files (required in Airflow 3)
 
 ## Adding Custom DAGs
 1. Create a new Python file in `dags/`
-2. Define your DAG using the Airflow API
-3. Scheduler automatically picks it up (refresh UI)
+2. Define your DAG using the Airflow 3 SDK / standard provider operators
+3. Dag processor picks it up automatically (refresh UI)
+
+Example imports for Airflow 3:
+
+```python
+from airflow.sdk import DAG
+from airflow.providers.standard.operators.python import PythonOperator
+from airflow.providers.standard.operators.bash import BashOperator
+```
 
 ## Environment Variables
-See `docker-compose.yml` for Airflow config (database, executor, etc.).
+See `docker-compose.yml` for Airflow config (database, executor, auth, etc.).
 
 Commodity DAG:
 - `ALPHA_VANTAGE_API_KEY` (or `ALPHA_VANTAGE_KEY`) — required for live prices (see `.env.example`)
@@ -111,4 +121,5 @@ Commodity DAG:
 ## Notes
 - Uses **LocalExecutor** for single-machine setup
 - PostgreSQL stores metadata and DAG state
-- For production, consider AWS MWAA, Celery workers, or Kubernetes deployment
+- Auth uses Airflow 3 **Simple Auth Manager** (`admin` / `admin` for local use)
+- For production, consider the official Helm chart, Celery/Kubernetes executors, and a stronger auth manager

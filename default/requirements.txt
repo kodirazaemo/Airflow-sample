@@ -1,5 +1,8 @@
-apache-airflow==2.8.1
-apache-airflow-providers-postgres==5.10.1
-psycopg2-binary==2.9.9
-redis==5.0.1
-flask-session==0.5.0
+# Pinned for Apache Airflow 3.3.1 on Python 3.12
+# Constraints reference:
+# https://raw.githubusercontent.com/apache/airflow/constraints-3.3.1/constraints-3.12.txt
+apache-airflow==3.3.1
+apache-airflow-providers-standard==1.17.0
+apache-airflow-providers-postgres==7.0.1
+psycopg2-binary==2.9.12
+redis==6.4.0

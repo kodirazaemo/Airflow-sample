@@ -1,5 +1,28 @@
 version: '3.8'
 
+x-airflow-common: &airflow-common
+  build: .
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__DAGS_FOLDER: /app/dags
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: admin:admin
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /app/simple_auth_manager_passwords.json.generated
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+    AIRFLOW__API__BASE_URL: http://localhost:8080
+    ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:-demo}
+    ALPHA_VANTAGE_KEY: ${ALPHA_VANTAGE_KEY:-}
+    ALPHA_VANTAGE_INTERVAL: ${ALPHA_VANTAGE_INTERVAL:-monthly}
+    ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS: ${ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS:-15}
+  volumes:
+    - ./dags:/app/dags
+    - ./logs:/app/logs
+
 services:
   postgres:
     image: postgres:15-alpine
@@ -27,57 +50,19 @@ services:
       timeout: 5s
       retries: 5
 
-  airflow-webserver:
-    build: .
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      AIRFLOW_DATABASE_HOST: postgres
-      AIRFLOW_DATABASE_USER: airflow
-      AIRFLOW_DATABASE_PASSWORD: airflow
-      AIRFLOW_DATABASE_DB: airflow
-      AIRFLOW_EXECUTOR: LocalExecutor
-      AIRFLOW__CORE__DAGS_FOLDER: /app/dags
-      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
-      ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:-demo}
-      ALPHA_VANTAGE_KEY: ${ALPHA_VANTAGE_KEY:-}
-      ALPHA_VANTAGE_INTERVAL: ${ALPHA_VANTAGE_INTERVAL:-monthly}
-      ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS: ${ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS:-15}
+  airflow-api-server:
+    <<: *airflow-common
     ports:
       - "8080:8080"
-    volumes:
-      - ./dags:/app/dags
-      - ./logs:/app/logs
-    command: airflow webserver --port 8080
+    command: airflow api-server --port 8080
 
   airflow-scheduler:
-    build: .
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      AIRFLOW_DATABASE_HOST: postgres
-      AIRFLOW_DATABASE_USER: airflow
-      AIRFLOW_DATABASE_PASSWORD: airflow
-      AIRFLOW_DATABASE_DB: airflow
-      AIRFLOW_EXECUTOR: LocalExecutor
-      AIRFLOW__CORE__DAGS_FOLDER: /app/dags
-      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
-      ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:-demo}
-      ALPHA_VANTAGE_KEY: ${ALPHA_VANTAGE_KEY:-}
-      ALPHA_VANTAGE_INTERVAL: ${ALPHA_VANTAGE_INTERVAL:-monthly}
-      ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS: ${ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS:-15}
-    volumes:
-      - ./dags:/app/dags
-      - ./logs:/app/logs
+    <<: *airflow-common
     command: airflow scheduler
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: airflow dag-processor
 
 volumes:
   postgres_data:
