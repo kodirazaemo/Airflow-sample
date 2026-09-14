@@ -46,15 +46,34 @@ docker compose down
 
 ## Commodity Trading DAG (`commodity_dag.py`)
 
-Daily pipeline (`commodity_trading_dag`) that pulls live commodity data from **Alpha Vantage**:
+Daily pipeline (`commodity_trading_dag`) that pulls live commodity data from **Alpha Vantage** and scores trades with a **weighted multi-indicator model**:
 
 1. **start_trading_session** — opens the session (Bash)
-2. **fetch_market_prices** — calls Alpha Vantage for gold, WTI crude, wheat, copper, and natural gas
+2. **fetch_market_prices** — calls Alpha Vantage for gold, WTI crude, wheat, copper, and natural gas (stores price history)
 3. **validate_market_data** — checks for missing/invalid quotes
-4. **compute_trading_signals** — BUY / SELL / HOLD from period-over-period momentum
+4. **compute_trading_signals** — runs separate signal functions, then combines them by weight
 5. **generate_trade_orders** — builds notional orders for actionable signals
-6. **publish_daily_report** — prints an end-of-day summary
+6. **publish_daily_report** — prints an end-of-day summary with per-indicator detail
 7. **close_trading_session** — closes the session (Bash)
+
+### Signal functions (each independent)
+
+| Function | Signal | Default weight |
+|----------|--------|----------------|
+| `compute_momentum_signal` | Period-over-period price change | 0.15 |
+| `compute_moving_average_signal` | SMA(5) vs SMA(20) trend | 0.25 |
+| `compute_rsi_signal` | RSI(14) oversold / overbought | 0.25 |
+| `compute_macd_signal` | MACD(12,26,9) histogram | 0.25 |
+| `compute_obv_signal` | OBV trend vs SMA (synthetic volume*) | 0.10 |
+
+\*Commodity endpoints do not provide volume, so OBV uses `|price change|` as a volume proxy.
+
+Each indicator returns `BUY (+1)`, `SELL (-1)`, or `HOLD (0)`.  
+`combine_weighted_signals()` computes a weighted score:
+
+- **BUY** if score ≥ `SIGNAL_BUY_THRESHOLD` (default `0.25`)
+- **SELL** if score ≤ `SIGNAL_SELL_THRESHOLD` (default `-0.25`)
+- **HOLD** otherwise
 
 | Symbol | Alpha Vantage function | Interval |
 |--------|------------------------|----------|
@@ -83,9 +102,11 @@ Use your own free API key for full coverage (including gold). The public `demo` 
 See `docker-compose.yml` for Airflow config (database, executor, etc.).
 
 Commodity DAG:
-- `ALPHA_VANTAGE_API_KEY` — required for live prices (see `.env.example`)
+- `ALPHA_VANTAGE_API_KEY` (or `ALPHA_VANTAGE_KEY`) — required for live prices (see `.env.example`)
 - `ALPHA_VANTAGE_INTERVAL` — `monthly` (default) or `daily`
 - `ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS` — delay between API calls (default `15`)
+- `SIGNAL_WEIGHT_MOMENTUM` / `SIGNAL_WEIGHT_MOVING_AVERAGE` / `SIGNAL_WEIGHT_RSI` / `SIGNAL_WEIGHT_MACD` / `SIGNAL_WEIGHT_OBV` — optional weight overrides
+- `SIGNAL_BUY_THRESHOLD` / `SIGNAL_SELL_THRESHOLD` — weighted-score cutoffs (defaults `0.25` / `-0.25`)
 
 ## Notes
 - Uses **LocalExecutor** for single-machine setup
