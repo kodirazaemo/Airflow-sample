@@ -95,6 +95,25 @@ Use your own free API key for full coverage (including gold). The public `demo` 
 - **Airflow Scheduler:** schedules Dag runs
 - **Airflow Dag processor:** parses Dag files (required in Airflow 3)
 
+### Troubleshooting task runs (Airflow 3 + Docker)
+
+If a manual run stalls on the first task (`queued` / retry) and you never see Alpha Vantage fetch logs:
+
+1. Rebuild so scheduler gets the Execution API URL fix:
+   ```bash
+   docker compose down
+   docker compose up -d --build
+   ```
+2. Confirm compose sets:
+   `AIRFLOW__CORE__EXECUTION_API_SERVER_URL=http://airflow-api-server:8080/execution/`
+   (must be the **api-server service name**, not `localhost`)
+3. Inspect the failed task log in the UI, or:
+   ```bash
+   docker compose logs airflow-scheduler --tail=200
+   ```
+4. After a successful `fetch_market_prices` run you should see lines like:
+   `Fetched GOLD via Alpha Vantage ...`
+
 ## Adding Custom DAGs
 1. Create a new Python file in `dags/`
 2. Define your DAG using the Airflow 3 SDK / standard provider operators
