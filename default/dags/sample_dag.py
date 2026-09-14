@@ -1,6 +1,5 @@
 from datetime import datetime, timedelta
 
-from airflow.providers.standard.operators.bash import BashOperator
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
 
@@ -15,6 +14,11 @@ default_args = {
 def print_hello():
     print("Hello from Airflow!")
     return "Hello world"
+
+
+def print_middle():
+    print("Running middle step in Airflow")
+    return "middle"
 
 
 def print_goodbye():
@@ -37,9 +41,9 @@ with DAG(
         python_callable=print_hello,
     )
 
-    task_2 = BashOperator(
-        task_id='bash_task',
-        bash_command='echo "Running bash command in Airflow"',
+    task_2 = PythonOperator(
+        task_id='middle_task',
+        python_callable=print_middle,
     )
 
     task_3 = PythonOperator(
