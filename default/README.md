@@ -1,6 +1,6 @@
 # Airflow Sample Project
 
-A containerized **Apache Airflow 3.3.1** (Python 3.12) setup with PostgreSQL, Redis, and sample DAGs — including a commodity trading pipeline powered by Alpha Vantage.
+A containerized **Apache Airflow 3.3.1** (Python 3.12) setup with PostgreSQL, Redis, and sample DAGs — including a commodity trading pipeline that **reads Alpha Vantage data through the official MCP server**.
 
 ## Quick Start
 
@@ -12,10 +12,25 @@ A containerized **Apache Airflow 3.3.1** (Python 3.12) setup with PostgreSQL, Re
 ### Configure Alpha Vantage
 ```bash
 cp .env.example .env
-# Edit .env and set ALPHA_VANTAGE_API_KEY to your key
+# Edit .env and set ALPHA_VANTAGE_API_KEY to your key (do not commit .env)
 ```
 
 `docker compose` reads `.env` automatically and passes the key into Airflow services.
+
+The sample authenticates to the [Alpha Vantage MCP server](https://mcp.alphavantage.co/#connection-examples) using that key. Interactive OAuth is for desktop MCP clients; Airflow uses the documented API-key connection patterns:
+
+| `ALPHA_VANTAGE_TRANSPORT` | What it does |
+|---------------------------|--------------|
+| `http` (default) | Streamable HTTP via compose `mcp-https-forwarder` (host TCP 18080) |
+| `sse` | Legacy HTTP+SSE, same forwarder |
+| `stdio` | Local `uvx marketdata-mcp-server YOUR_API_KEY` (needs `uvx` on the worker) |
+| `rest` | Legacy `www.alphavantage.co/query` HTTP API (not MCP) |
+
+Compose maps `mcp.alphavantage.co` to `host-gateway` and forwards `host:18080` → `mcp.alphavantage.co:443`. That is a **compose** workaround for Docker bridges that cannot SNAT to the public internet (nested VMs, some CI). It is separate from a host sysctl such as `net.bridge.bridge-nf-call-iptables=0`, which only affects container-to-container traffic on the same bridge.
+
+Docker Desktop for Mac/Windows does not support `network_mode: host`. On those setups, comment out the `mcp-https-forwarder` extra_hosts if needed and set `ALPHA_VANTAGE_MCP_URL=https://mcp.alphavantage.co/mcp` (direct Cloudflare).
+
+The API key is never written to git. Task logs redact `apikey=` query values.
 
 ### Run
 ```bash
@@ -25,6 +40,14 @@ docker compose up -d --build
 Access Airflow at `http://localhost:8080`
 - **Username:** `admin`
 - **Password:** `admin`
+
+### Invoke an MCP read
+1. Set `ALPHA_VANTAGE_API_KEY` in `.env` and start compose (above).
+2. In the UI, enable and trigger **`alpha_vantage_mcp_read`** (manual DAG, no schedule).
+3. Task `list_mcp_tools` runs MCP `tools/list`.
+4. Task `read_wti_monthly` runs MCP `tools/call` for `WTI` with `interval=monthly`.
+
+The daily **`commodity_trading_dag`** uses the same MCP client for gold, WTI, wheat, copper, and natural gas.
 
 ### Stop
 ```bash
@@ -37,25 +60,30 @@ docker compose down
 ├── Dockerfile              # Multi-stage build (Python 3.12 + Airflow 3.3.1)
 ├── docker-compose.yml      # api-server, scheduler, dag-processor, postgres, redis
 ├── entrypoint.sh           # DB migrate + Simple Auth Manager bootstrap
-├── requirements.txt        # Python dependencies
-├── .env.example            # Alpha Vantage / signal config template
+├── requirements.txt        # Python dependencies (includes the MCP SDK)
+├── .env.example            # Alpha Vantage / MCP / signal config template
 ├── dags/
-│   ├── sample_dag.py       # Example DAG with Python & Bash tasks
-│   └── commodity_dag.py    # Commodity trading sample pipeline
+│   ├── sample_dag.py                 # Example DAG with Python tasks
+│   ├── alpha_vantage_mcp.py          # MCP client (http / sse / stdio)
+│   ├── alpha_vantage_mcp_read_dag.py # Manual tools/list + WTI tools/call
+│   └── commodity_dag.py              # Commodity trading sample pipeline
+├── tests/                  # Unit tests with a mocked MCP session
 └── .dockerignore
 ```
 
 ## Commodity Trading DAG (`commodity_dag.py`)
 
-Daily pipeline (`commodity_trading_dag`) that pulls live commodity data from **Alpha Vantage** and scores trades with a **weighted multi-indicator model**:
+Daily pipeline (`commodity_trading_dag`) that pulls live commodity data from **Alpha Vantage MCP** and scores trades with a **weighted multi-indicator model**:
 
-1. **start_trading_session** — opens the session (Bash)
-2. **fetch_market_prices** — calls Alpha Vantage for gold, WTI crude, wheat, copper, and natural gas (stores price history)
+1. **start_trading_session** — opens the session
+2. **fetch_market_prices** — MCP `tools/list` then `tools/call` for gold, WTI crude, wheat, copper, and natural gas (stores price history)
 3. **validate_market_data** — checks for missing/invalid quotes
 4. **compute_trading_signals** — runs separate signal functions, then combines them by weight
 5. **generate_trade_orders** — builds notional orders for actionable signals
 6. **publish_daily_report** — prints an end-of-day summary with per-indicator detail
-7. **close_trading_session** — closes the session (Bash)
+7. **close_trading_session** — closes the session
+
+Alpha Vantage functions (`WTI`, `COPPER`, `GOLD_SILVER_HISTORY`, …) are exposed as MCP tools; the client discovers them with `tools/list` and reads with `tools/call`.
 
 ### Signal functions (each independent)
 
@@ -76,7 +104,7 @@ Each indicator returns `BUY (+1)`, `SELL (-1)`, or `HOLD (0)`.
 - **SELL** if score ≤ `SIGNAL_SELL_THRESHOLD` (default `-0.25`)
 - **HOLD** otherwise
 
-| Symbol | Alpha Vantage function | Interval |
+| Symbol | Alpha Vantage MCP tool | Interval |
 |--------|------------------------|----------|
 | `GOLD` | `GOLD_SILVER_HISTORY` (spot fallback) | monthly by default (daily optional) |
 | `CRUDE_OIL` | `WTI` | monthly by default (daily optional) |
@@ -112,7 +140,7 @@ If a manual run stalls on the first task (`queued` / retry) and you never see Al
    docker compose logs airflow-scheduler --tail=200
    ```
 4. After a successful `fetch_market_prices` run you should see lines like:
-   `Fetched GOLD via Alpha Vantage ...`
+   `Fetched GOLD via alpha_vantage_mcp ...`
 
 ## Adding Custom DAGs
 1. Create a new Python file in `dags/`
@@ -127,15 +155,38 @@ from airflow.providers.standard.operators.python import PythonOperator
 from airflow.providers.standard.operators.bash import BashOperator
 ```
 
+MCP reads from Python tasks:
+
+```python
+from alpha_vantage_mcp import AlphaVantageMcpClient
+
+with AlphaVantageMcpClient() as client:
+    tools = client.list_tools()          # MCP tools/list
+    payload = client.call_tool('WTI', {'interval': 'monthly'})  # tools/call
+```
+
 ## Environment Variables
 See `docker-compose.yml` for Airflow config (database, executor, auth, etc.).
 
-Commodity DAG:
+Commodity / MCP:
 - `ALPHA_VANTAGE_API_KEY` (or `ALPHA_VANTAGE_KEY`) — required for live prices (see `.env.example`)
+- `ALPHA_VANTAGE_TRANSPORT` — `http` (default), `sse`, `stdio`, or `rest`
+- `ALPHA_VANTAGE_MCP_URL` — default `https://mcp.alphavantage.co:18080/mcp` (host-network forwarder)
+- `ALPHA_VANTAGE_MCP_SSE_URL` — default `https://mcp.alphavantage.co:18080/sse`
+- `ALPHA_VANTAGE_MCP_STDIO_COMMAND` / `ALPHA_VANTAGE_MCP_STDIO_ARGS` — local stdio server (`uvx` + `marketdata-mcp-server`)
 - `ALPHA_VANTAGE_INTERVAL` — `monthly` (default) or `daily`
 - `ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS` — delay between API calls (default `15`)
 - `SIGNAL_WEIGHT_MOMENTUM` / `SIGNAL_WEIGHT_MOVING_AVERAGE` / `SIGNAL_WEIGHT_RSI` / `SIGNAL_WEIGHT_MACD` / `SIGNAL_WEIGHT_OBV` — optional weight overrides
 - `SIGNAL_BUY_THRESHOLD` / `SIGNAL_SELL_THRESHOLD` — weighted-score cutoffs (defaults `0.25` / `-0.25`)
+
+## Tests
+From `default/`:
+
+```bash
+PYTHONPATH=dags python -m unittest discover -s tests -v
+```
+
+These tests mock the MCP session. They do not need a paid (or any live) Alpha Vantage key.
 
 ## Notes
 - Uses **LocalExecutor** for single-machine setup

@@ -2,7 +2,8 @@
 Commodity trading sample DAG.
 
 Daily pipeline that:
-1. Fetches commodity prices from the Alpha Vantage API
+1. Fetches commodity prices from the Alpha Vantage MCP server
+   (HTTP / SSE / stdio; see https://mcp.alphavantage.co/#connection-examples)
 2. Validates data quality
 3. Computes trading signals (momentum, moving averages, RSI, MACD, OBV)
 4. Combines signals with a weighted decision model
@@ -11,6 +12,7 @@ Daily pipeline that:
 
 Requires env var ALPHA_VANTAGE_API_KEY (or ALPHA_VANTAGE_KEY)
 (https://www.alphavantage.co/support/#api-key).
+Set ALPHA_VANTAGE_TRANSPORT=rest to use the legacy www.alphavantage.co REST API.
 """
 
 from __future__ import annotations
@@ -25,6 +27,8 @@ from datetime import datetime, timedelta
 
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
+
+from alpha_vantage_mcp import AlphaVantageMcpClient, get_api_key, get_transport
 
 default_args = {
     'owner': 'trading',
@@ -139,17 +143,7 @@ def get_commodities() -> dict:
 
 
 def _api_key() -> str:
-    key = (
-        os.environ.get('ALPHA_VANTAGE_API_KEY', '').strip()
-        or os.environ.get('ALPHA_VANTAGE_KEY', '').strip()
-    )
-    if not key:
-        raise ValueError(
-            'ALPHA_VANTAGE_API_KEY (or ALPHA_VANTAGE_KEY) is not set. '
-            'Get a free key at https://www.alphavantage.co/support/#api-key '
-            'and export it (or set it in docker-compose / .env).'
-        )
-    return key
+    return get_api_key()
 
 
 def _request_pause_seconds() -> float:
@@ -161,7 +155,7 @@ def _request_pause_seconds() -> float:
         return 15.0
 
 
-def _alpha_vantage_get(function: str, params: dict) -> dict:
+def _alpha_vantage_rest_get(function: str, params: dict) -> dict:
     # Keep apikey last. The public "demo" key rejects some query orderings.
     query = {'function': function, **params, 'apikey': _api_key()}
     url = f'{ALPHA_VANTAGE_BASE_URL}?{urllib.parse.urlencode(query)}'
@@ -180,12 +174,21 @@ def _alpha_vantage_get(function: str, params: dict) -> dict:
     if not isinstance(payload, dict):
         raise ValueError(f'Unexpected Alpha Vantage payload type for {function}: {type(payload)}')
 
-    # Common Alpha Vantage soft-error envelopes
     for key in ('Error Message', 'Information', 'Note'):
         if key in payload:
             raise RuntimeError(f'Alpha Vantage {key} for {function}: {payload[key]}')
 
     return payload
+
+
+def _alpha_vantage_get(function: str, params: dict, client: AlphaVantageMcpClient | None = None) -> dict:
+    """Read one Alpha Vantage function via MCP tools/call, or REST if configured."""
+    if get_transport() == 'rest':
+        return _alpha_vantage_rest_get(function, params)
+    if client is None:
+        with AlphaVantageMcpClient() as owned:
+            return owned.call_tool(function, params)
+    return client.call_tool(function, params)
 
 
 def _parse_price_series(payload: dict) -> tuple[list[dict], str]:
@@ -227,6 +230,10 @@ def _chrono_prices(series_newest_first: list[dict], limit: int = _MAX_SERIES_POI
     return chrono
 
 
+def _price_source() -> str:
+    return 'alpha_vantage_rest' if get_transport() == 'rest' else 'alpha_vantage_mcp'
+
+
 def _latest_quote(series_newest_first: list[dict], unit: str) -> dict:
     latest = series_newest_first[0]
     previous = series_newest_first[1] if len(series_newest_first) > 1 else None
@@ -244,11 +251,15 @@ def _latest_quote(series_newest_first: list[dict], unit: str) -> dict:
         'change_pct': change_pct,
         'as_of': latest['date'],
         'prior_as_of': prior_as_of,
-        'source': 'alpha_vantage',
+        'source': _price_source(),
     }
 
 
-def fetch_commodity_quote(symbol: str, meta: dict) -> dict:
+def fetch_commodity_quote(
+    symbol: str,
+    meta: dict,
+    client: AlphaVantageMcpClient | None = None,
+) -> dict:
     """Fetch one commodity from Alpha Vantage, with optional interval / spot fallback."""
     attempts = [(meta['function'], meta['params'])]
     if meta.get('fallback_params'):
@@ -261,7 +272,7 @@ def fetch_commodity_quote(symbol: str, meta: dict) -> dict:
     pause = _request_pause_seconds()
     for index, (function, params) in enumerate(attempts):
         try:
-            payload = _alpha_vantage_get(function, params)
+            payload = _alpha_vantage_get(function, params, client=client)
             series_newest_first, unit = _parse_price_series(payload)
             quote = _latest_quote(series_newest_first, unit)
             quote['symbol'] = symbol
@@ -592,33 +603,48 @@ def combine_weighted_signals(component_signals: dict[str, dict], weights: dict[s
 # ---------------------------------------------------------------------------
 
 def fetch_market_prices(**context):
-    """Pull latest commodity prices (and history) from Alpha Vantage."""
+    """Pull latest commodity prices (and history) via Alpha Vantage MCP (or REST)."""
     commodities = get_commodities()
     prices = {}
     series_by_symbol = {}
     symbols = list(commodities.items())
     pause = _request_pause_seconds()
+    transport = get_transport()
+    source = _price_source()
 
-    for index, (symbol, meta) in enumerate(symbols):
-        quote = fetch_commodity_quote(symbol, meta)
-        prices[symbol] = {
-            'price': quote['price'],
-            'unit': quote['unit'],
-            'change_pct': quote['change_pct'],
-            'as_of': quote['as_of'],
-            'prior_as_of': quote.get('prior_as_of'),
-            'interval': quote.get('interval'),
-            'source': 'alpha_vantage',
-            'history_points': len(quote.get('series') or []),
-        }
-        series_by_symbol[symbol] = quote.get('series') or []
-        print(
-            f"Fetched {symbol} via Alpha Vantage ({quote.get('interval')}): "
-            f"{quote['price']} {quote['unit']} ({quote['change_pct']:+.3f}%) "
-            f"as of {quote['as_of']} [{prices[symbol]['history_points']} pts]"
-        )
-        if index < len(symbols) - 1 and pause > 0:
-            time.sleep(pause)
+    def _run(client: AlphaVantageMcpClient | None) -> None:
+        if client is not None:
+            tools = client.list_tools()
+            print(
+                f'Alpha Vantage MCP ({transport}) connected; '
+                f'{len(tools)} tools available'
+            )
+        for index, (symbol, meta) in enumerate(symbols):
+            quote = fetch_commodity_quote(symbol, meta, client=client)
+            prices[symbol] = {
+                'price': quote['price'],
+                'unit': quote['unit'],
+                'change_pct': quote['change_pct'],
+                'as_of': quote['as_of'],
+                'prior_as_of': quote.get('prior_as_of'),
+                'interval': quote.get('interval'),
+                'source': source,
+                'history_points': len(quote.get('series') or []),
+            }
+            series_by_symbol[symbol] = quote.get('series') or []
+            print(
+                f"Fetched {symbol} via {source} ({quote.get('interval')}): "
+                f"{quote['price']} {quote['unit']} ({quote['change_pct']:+.3f}%) "
+                f"as of {quote['as_of']} [{prices[symbol]['history_points']} pts]"
+            )
+            if index < len(symbols) - 1 and pause > 0:
+                time.sleep(pause)
+
+    if transport == 'rest':
+        _run(None)
+    else:
+        with AlphaVantageMcpClient() as client:
+            _run(client)
 
     context['ti'].xcom_push(key='market_prices', value=prices)
     context['ti'].xcom_push(key='price_series', value=series_by_symbol)
@@ -758,7 +784,7 @@ def publish_daily_report(**context):
 
     report = {
         'trading_date': context['ds'],
-        'price_source': 'alpha_vantage',
+        'price_source': _price_source(),
         'commodities_tracked': len(prices),
         'signals': {'BUY': buys, 'SELL': sells, 'HOLD': holds},
         'orders_generated': len(orders),
@@ -768,7 +794,7 @@ def publish_daily_report(**context):
 
     print('=' * 60)
     print(f"Commodity Trading Daily Report — {report['trading_date']}")
-    print('Price source: Alpha Vantage')
+    print(f"Price source: {_price_source()}")
     print('Decision model: weighted momentum + MA + RSI + MACD + OBV')
     print('=' * 60)
     print(f"Tracked: {report['commodities_tracked']} commodities")
@@ -796,7 +822,7 @@ def publish_daily_report(**context):
 
 def open_trading_session(**context):
     """Session open marker (replaces BashOperator to avoid shell dependency)."""
-    print(f"Opening commodity trading session for {context['ds']} (Alpha Vantage)")
+    print(f"Opening commodity trading session for {context['ds']} ({_price_source()})")
     return {'session': 'open', 'trading_date': context['ds']}
 
 
@@ -809,11 +835,11 @@ def close_trading_session(**context):
 with DAG(
     dag_id='commodity_trading_dag',
     default_args=default_args,
-    description='Commodity trading pipeline using Alpha Vantage + weighted technical signals',
+    description='Commodity trading pipeline using Alpha Vantage MCP + weighted technical signals',
     start_date=datetime(2024, 1, 1),
     schedule=timedelta(days=1),
     catchup=False,
-    tags=['commodity', 'trading', 'alpha-vantage', 'sample'],
+    tags=['commodity', 'trading', 'alpha-vantage', 'mcp', 'sample'],
 ) as dag:
 
     start = PythonOperator(
