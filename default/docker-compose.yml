@@ -23,6 +23,13 @@ x-airflow-common: &airflow-common
     ALPHA_VANTAGE_KEY: ${ALPHA_VANTAGE_KEY:-}
     ALPHA_VANTAGE_INTERVAL: ${ALPHA_VANTAGE_INTERVAL:-monthly}
     ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS: ${ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS:-15}
+    # MCP connection: http (default Streamable HTTP), sse, stdio, or rest (legacy REST).
+    # Docs: https://mcp.alphavantage.co/#connection-examples
+    ALPHA_VANTAGE_TRANSPORT: ${ALPHA_VANTAGE_TRANSPORT:-http}
+    ALPHA_VANTAGE_MCP_URL: ${ALPHA_VANTAGE_MCP_URL:-https://mcp.alphavantage.co/mcp}
+    ALPHA_VANTAGE_MCP_SSE_URL: ${ALPHA_VANTAGE_MCP_SSE_URL:-https://mcp.alphavantage.co/sse}
+    ALPHA_VANTAGE_MCP_STDIO_COMMAND: ${ALPHA_VANTAGE_MCP_STDIO_COMMAND:-uvx}
+    ALPHA_VANTAGE_MCP_STDIO_ARGS: ${ALPHA_VANTAGE_MCP_STDIO_ARGS:-marketdata-mcp-server}
   volumes:
     - ./dags:/app/dags
     - ./logs:/app/logs
