@@ -21,10 +21,14 @@ The sample authenticates to the [Alpha Vantage MCP server](https://mcp.alphavant
 
 | `ALPHA_VANTAGE_TRANSPORT` | What it does |
 |---------------------------|--------------|
-| `http` (default) | Streamable HTTP: `https://mcp.alphavantage.co/mcp?apikey=…` |
-| `sse` | Legacy HTTP+SSE: `https://mcp.alphavantage.co/sse?apikey=…` |
+| `http` (default) | Streamable HTTP via compose `mcp-https-forwarder` (host TCP 18080) |
+| `sse` | Legacy HTTP+SSE, same forwarder |
 | `stdio` | Local `uvx marketdata-mcp-server YOUR_API_KEY` (needs `uvx` on the worker) |
 | `rest` | Legacy `www.alphavantage.co/query` HTTP API (not MCP) |
+
+Compose maps `mcp.alphavantage.co` to `host-gateway` and forwards `host:18080` → `mcp.alphavantage.co:443`. That is a **compose** workaround for Docker bridges that cannot SNAT to the public internet (nested VMs, some CI). It is separate from a host sysctl such as `net.bridge.bridge-nf-call-iptables=0`, which only affects container-to-container traffic on the same bridge.
+
+Docker Desktop for Mac/Windows does not support `network_mode: host`. On those setups, comment out the `mcp-https-forwarder` extra_hosts if needed and set `ALPHA_VANTAGE_MCP_URL=https://mcp.alphavantage.co/mcp` (direct Cloudflare).
 
 The API key is never written to git. Task logs redact `apikey=` query values.
 
@@ -167,8 +171,8 @@ See `docker-compose.yml` for Airflow config (database, executor, auth, etc.).
 Commodity / MCP:
 - `ALPHA_VANTAGE_API_KEY` (or `ALPHA_VANTAGE_KEY`) — required for live prices (see `.env.example`)
 - `ALPHA_VANTAGE_TRANSPORT` — `http` (default), `sse`, `stdio`, or `rest`
-- `ALPHA_VANTAGE_MCP_URL` — Streamable HTTP endpoint (default `https://mcp.alphavantage.co/mcp`)
-- `ALPHA_VANTAGE_MCP_SSE_URL` — SSE endpoint (default `https://mcp.alphavantage.co/sse`)
+- `ALPHA_VANTAGE_MCP_URL` — default `https://mcp.alphavantage.co:18080/mcp` (host-network forwarder)
+- `ALPHA_VANTAGE_MCP_SSE_URL` — default `https://mcp.alphavantage.co:18080/sse`
 - `ALPHA_VANTAGE_MCP_STDIO_COMMAND` / `ALPHA_VANTAGE_MCP_STDIO_ARGS` — local stdio server (`uvx` + `marketdata-mcp-server`)
 - `ALPHA_VANTAGE_INTERVAL` — `monthly` (default) or `daily`
 - `ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS` — delay between API calls (default `15`)

@@ -103,30 +103,84 @@ def stdio_server_spec(api_key: str | None = None) -> tuple[str, list[str]]:
     return command, args
 
 
+def _exception_text(exc: BaseException) -> str:
+    """Flatten ExceptionGroup / TaskGroup messages for Airflow logs."""
+    parts: list[str] = [str(exc)]
+    nested = getattr(exc, 'exceptions', None)
+    if nested:
+        parts.extend(str(item) for item in nested)
+    cause = exc.__cause__
+    if cause is not None:
+        parts.append(str(cause))
+        cause_nested = getattr(cause, 'exceptions', None)
+        if cause_nested:
+            parts.extend(str(item) for item in cause_nested)
+    return ' | '.join(part for part in parts if part)
+
+
+def _normalize_tool_payload(payload: Any, *, fallback_text: str = '') -> dict:
+    if isinstance(payload, dict) and list(payload.keys()) == ['result']:
+        payload = payload['result']
+    if isinstance(payload, str):
+        payload = _parse_tool_text(payload)
+    if payload is None and fallback_text:
+        payload = _parse_tool_text(fallback_text)
+    if not isinstance(payload, dict):
+        raise ValueError(f'Unexpected Alpha Vantage MCP payload type: {type(payload)}')
+    return payload
+
+
+def _parse_tool_text(text: str) -> dict:
+    stripped = text.strip()
+    if not stripped:
+        raise ValueError('Alpha Vantage MCP tool returned no content')
+    try:
+        decoded = json.loads(stripped)
+    except json.JSONDecodeError:
+        decoded = None
+    if isinstance(decoded, dict):
+        return decoded
+    if isinstance(decoded, list):
+        return {'data': decoded}
+    return _parse_csv_series(stripped)
+
+
+def _parse_csv_series(text: str) -> dict:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) < 2 or ',' not in lines[0]:
+        raise ValueError(f'Alpha Vantage MCP tool returned non-JSON text: {text[:300]}')
+    headers = [item.strip().lower() for item in lines[0].split(',')]
+    date_i = next((i for i, name in enumerate(headers) if name in {'timestamp', 'date', 'time'}), 0)
+    value_i = next(
+        (i for i, name in enumerate(headers) if name in {'value', 'price', 'close'}),
+        1 if len(headers) > 1 else 0,
+    )
+    series = []
+    for row in lines[1:]:
+        parts = [item.strip() for item in row.split(',')]
+        if len(parts) <= max(date_i, value_i):
+            continue
+        raw = parts[value_i]
+        if raw in {'', '.'}:
+            continue
+        series.append({'date': parts[date_i][:10], 'value': raw})
+    if not series:
+        raise ValueError('Alpha Vantage MCP CSV contained no observations')
+    return {'data': series}
+
+
 def parse_mcp_tool_result(result: Any) -> dict:
     """Turn an MCP CallToolResult into an Alpha Vantage JSON object."""
     if getattr(result, 'isError', False):
         detail = _content_text(getattr(result, 'content', None)) or 'MCP tool returned isError'
         raise RuntimeError(f'Alpha Vantage MCP tool error: {detail}')
 
+    text = _content_text(getattr(result, 'content', None))
     structured = getattr(result, 'structuredContent', None)
     if isinstance(structured, dict) and structured:
-        payload = structured
+        payload = _normalize_tool_payload(structured, fallback_text=text)
     else:
-        text = _content_text(getattr(result, 'content', None))
-        if not text:
-            raise ValueError('Alpha Vantage MCP tool returned no content')
-        try:
-            decoded = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f'Alpha Vantage MCP tool returned non-JSON text: {text[:300]}'
-            ) from exc
-        if not isinstance(decoded, dict):
-            raise ValueError(
-                f'Unexpected Alpha Vantage MCP payload type: {type(decoded)}'
-            )
-        payload = decoded
+        payload = _parse_tool_text(text)
 
     for key in ('Error Message', 'Information', 'Note'):
         if key in payload:
@@ -189,7 +243,7 @@ class AlphaVantageMcpClient:
                 self._loop = None
             raise RuntimeError(
                 f'Failed to open Alpha Vantage MCP ({self.transport}) session: '
-                f'{redact_secrets(str(exc), self.api_key)}'
+                f'{redact_secrets(_exception_text(exc), self.api_key)}'
             ) from None
         return self
 
@@ -197,6 +251,9 @@ class AlphaVantageMcpClient:
         try:
             if self._session_cm is not None and self._loop is not None:
                 self._loop.run_until_complete(self._session_cm.__aexit__(exc_type, exc, tb))
+        except Exception:
+            # Remote MCP may return 501 on session DELETE; don't fail the task after a successful read.
+            pass
         finally:
             if self._loop is not None:
                 self._loop.close()
@@ -211,7 +268,7 @@ class AlphaVantageMcpClient:
         except Exception as exc:
             raise RuntimeError(
                 f'Alpha Vantage MCP tools/list failed: '
-                f'{redact_secrets(str(exc), self.api_key)}'
+                f'{redact_secrets(_exception_text(exc), self.api_key)}'
             ) from None
 
     def call_tool(self, name: str, arguments: dict | None = None) -> dict:
@@ -221,7 +278,7 @@ class AlphaVantageMcpClient:
         except Exception as exc:
             raise RuntimeError(
                 f'Alpha Vantage MCP tools/call {name} failed: '
-                f'{redact_secrets(str(exc), self.api_key)}'
+                f'{redact_secrets(_exception_text(exc), self.api_key)}'
             ) from None
 
     def _run(self, coro):

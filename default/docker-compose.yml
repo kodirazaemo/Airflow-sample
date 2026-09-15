@@ -7,6 +7,8 @@ x-airflow-common: &airflow-common
       condition: service_healthy
     redis:
       condition: service_healthy
+    mcp-https-forwarder:
+      condition: service_started
   environment: &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__CORE__DAGS_FOLDER: /app/dags
@@ -26,15 +28,32 @@ x-airflow-common: &airflow-common
     # MCP connection: http (default Streamable HTTP), sse, stdio, or rest (legacy REST).
     # Docs: https://mcp.alphavantage.co/#connection-examples
     ALPHA_VANTAGE_TRANSPORT: ${ALPHA_VANTAGE_TRANSPORT:-http}
-    ALPHA_VANTAGE_MCP_URL: ${ALPHA_VANTAGE_MCP_URL:-https://mcp.alphavantage.co/mcp}
-    ALPHA_VANTAGE_MCP_SSE_URL: ${ALPHA_VANTAGE_MCP_SSE_URL:-https://mcp.alphavantage.co/sse}
+    # TLS to MCP goes through mcp-https-forwarder on the host network (port 18080).
+    # extra_hosts keeps the certificate hostname mcp.alphavantage.co while TCP
+    # lands on the host, which can reach the internet when the compose bridge cannot.
+    ALPHA_VANTAGE_MCP_URL: ${ALPHA_VANTAGE_MCP_URL:-https://mcp.alphavantage.co:18080/mcp}
+    ALPHA_VANTAGE_MCP_SSE_URL: ${ALPHA_VANTAGE_MCP_SSE_URL:-https://mcp.alphavantage.co:18080/sse}
     ALPHA_VANTAGE_MCP_STDIO_COMMAND: ${ALPHA_VANTAGE_MCP_STDIO_COMMAND:-uvx}
     ALPHA_VANTAGE_MCP_STDIO_ARGS: ${ALPHA_VANTAGE_MCP_STDIO_ARGS:-marketdata-mcp-server}
+  extra_hosts:
+    - "mcp.alphavantage.co:host-gateway"
+    - "host.docker.internal:host-gateway"
   volumes:
     - ./dags:/app/dags
     - ./logs:/app/logs
 
 services:
+  # Host-network TLS forwarder so Airflow workers can reach Alpha Vantage MCP
+  # when the compose bridge cannot SNAT to the public internet (common on
+  # nested/CI VMs). Docker Desktop for Mac/Windows does not support host
+  # networking: set ALPHA_VANTAGE_MCP_URL=https://mcp.alphavantage.co/mcp
+  # (and the SSE URL without :18080) so workers talk to Cloudflare directly.
+  mcp-https-forwarder:
+    image: alpine/socat:1.8.0.3
+    network_mode: host
+    restart: unless-stopped
+    command: ["TCP-LISTEN:18080,fork,reuseaddr", "TCP:mcp.alphavantage.co:443"]
+
   postgres:
     image: postgres:15-alpine
     environment:

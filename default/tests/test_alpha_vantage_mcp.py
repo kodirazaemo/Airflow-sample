@@ -112,6 +112,22 @@ class ParseResultTests(unittest.TestCase):
         )
         self.assertEqual(parse_mcp_tool_result(result)['price'], '2300.1')
 
+    def test_parse_csv_text_content(self):
+        result = SimpleNamespace(
+            isError=False,
+            structuredContent={'result': 'timestamp,value\n2026-08-01,83.9\n2026-07-01,80.46\n'},
+            content=[],
+        )
+        payload = parse_mcp_tool_result(result)
+        self.assertEqual(payload['data'][0]['value'], '83.9')
+        self.assertEqual(payload['data'][0]['date'], '2026-08-01')
+        result = SimpleNamespace(
+            isError=False,
+            structuredContent={'price': '2300.1', 'unit': 'USD'},
+            content=[],
+        )
+        self.assertEqual(parse_mcp_tool_result(result)['price'], '2300.1')
+
     def test_parse_error_flag(self):
         result = SimpleNamespace(
             isError=True,
