@@ -6,3 +6,7 @@ apache-airflow-providers-standard==1.17.0
 apache-airflow-providers-postgres==7.0.1
 psycopg2-binary==2.9.12
 redis==6.4.0
+# Official MCP Python SDK (Streamable HTTP, SSE, stdio clients)
+mcp==1.25.0
+httpx-sse==0.4.3
+sse-starlette==2.2.1
