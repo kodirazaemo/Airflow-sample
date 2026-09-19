@@ -17,6 +17,7 @@ Set ALPHA_VANTAGE_TRANSPORT=rest to use the legacy www.alphavantage.co REST API.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -147,12 +148,46 @@ def _api_key() -> str:
 
 
 def _request_pause_seconds() -> float:
-    """Pause between API calls to respect free-tier rate limits."""
+    """Minimum spacing between API calls to respect free-tier rate limits."""
     raw = os.environ.get('ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS', '15')
     try:
         return max(0.0, float(raw))
     except ValueError:
         return 15.0
+
+
+def _fetch_concurrency() -> int:
+    """
+    Max in-flight Alpha Vantage requests inside fetch_market_prices.
+
+    Default 1 keeps free-tier keys safe. Raise for paid keys that allow
+    higher throughput (REST can truly parallelize; MCP serializes tools/call).
+    """
+    raw = os.environ.get('ALPHA_VANTAGE_FETCH_CONCURRENCY', '1')
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 1
+
+
+class _RequestPacer:
+    """Ensure minimum wall-clock spacing between Alpha Vantage requests."""
+
+    def __init__(self, pause_seconds: float):
+        self.pause_seconds = pause_seconds
+        self._lock = asyncio.Lock()
+        self._next_at = 0.0
+
+    async def wait(self) -> None:
+        if self.pause_seconds <= 0:
+            return
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            now = loop.time()
+            delay = self._next_at - now
+            if delay > 0:
+                await asyncio.sleep(delay)
+            self._next_at = loop.time() + self.pause_seconds
 
 
 def _alpha_vantage_rest_get(function: str, params: dict) -> dict:
@@ -189,6 +224,23 @@ def _alpha_vantage_get(function: str, params: dict, client: AlphaVantageMcpClien
         with AlphaVantageMcpClient() as owned:
             return owned.call_tool(function, params)
     return client.call_tool(function, params)
+
+
+async def _alpha_vantage_get_async(
+    function: str,
+    params: dict,
+    client: AlphaVantageMcpClient | None = None,
+) -> dict:
+    """Async Alpha Vantage read: REST via thread pool, MCP via session await."""
+    if get_transport() == 'rest':
+        return await asyncio.to_thread(_alpha_vantage_rest_get, function, params)
+    if client is None:
+        raise RuntimeError('MCP fetch requires an open AlphaVantageMcpClient')
+    call_async = getattr(client, 'call_tool_async', None)
+    if call_async is not None:
+        return await call_async(function, params)
+    # Sync fakes used in unit tests
+    return await asyncio.to_thread(client.call_tool, function, params)
 
 
 def _parse_price_series(payload: dict) -> tuple[list[dict], str]:
@@ -284,6 +336,45 @@ def fetch_commodity_quote(
             errors.append(str(exc))
             if index < len(attempts) - 1 and pause > 0:
                 time.sleep(pause)
+
+    raise RuntimeError(
+        f'Failed to fetch {symbol} from Alpha Vantage after {len(attempts)} attempt(s): '
+        + ' | '.join(errors)
+    )
+
+
+async def fetch_commodity_quote_async(
+    symbol: str,
+    meta: dict,
+    client: AlphaVantageMcpClient | None = None,
+    *,
+    pacer: _RequestPacer | None = None,
+) -> dict:
+    """Async fetch for one commodity (used by the batch fetch task)."""
+    attempts = [(meta['function'], meta['params'])]
+    if meta.get('fallback_params'):
+        attempts.append((meta['function'], meta['fallback_params']))
+    if meta.get('spot_fallback'):
+        spot = meta['spot_fallback']
+        attempts.append((spot['function'], spot['params']))
+
+    errors = []
+    local_pacer = pacer or _RequestPacer(_request_pause_seconds())
+    for index, (function, params) in enumerate(attempts):
+        try:
+            await local_pacer.wait()
+            payload = await _alpha_vantage_get_async(function, params, client=client)
+            series_newest_first, unit = _parse_price_series(payload)
+            quote = _latest_quote(series_newest_first, unit)
+            quote['symbol'] = symbol
+            quote['function'] = function
+            quote['interval'] = params.get('interval', 'spot')
+            quote['series'] = _chrono_prices(series_newest_first)
+            return quote
+        except Exception as exc:  # noqa: BLE001 - collect and try fallback
+            errors.append(str(exc))
+            if index >= len(attempts) - 1:
+                break
 
     raise RuntimeError(
         f'Failed to fetch {symbol} from Alpha Vantage after {len(attempts)} attempt(s): '
@@ -605,22 +696,49 @@ def combine_weighted_signals(component_signals: dict[str, dict], weights: dict[s
 def fetch_market_prices(**context):
     """Pull latest commodity prices (and history) via Alpha Vantage MCP (or REST)."""
     commodities = get_commodities()
-    prices = {}
-    series_by_symbol = {}
     symbols = list(commodities.items())
-    pause = _request_pause_seconds()
     transport = get_transport()
     source = _price_source()
+    concurrency = _fetch_concurrency()
+    pause = _request_pause_seconds()
 
-    def _run(client: AlphaVantageMcpClient | None) -> None:
+    async def _run_async(client: AlphaVantageMcpClient | None) -> tuple[dict, dict]:
+        prices: dict = {}
+        series_by_symbol: dict = {}
         if client is not None:
-            tools = client.list_tools()
+            list_async = getattr(client, 'list_tools_async', None)
+            if list_async is not None:
+                tools = await list_async()
+            else:
+                tools = await asyncio.to_thread(client.list_tools)
             print(
                 f'Alpha Vantage MCP ({transport}) connected; '
                 f'{len(tools)} tools available'
             )
-        for index, (symbol, meta) in enumerate(symbols):
-            quote = fetch_commodity_quote(symbol, meta, client=client)
+
+        sem = asyncio.Semaphore(concurrency)
+        pacer = _RequestPacer(pause)
+
+        async def fetch_one(symbol: str, meta: dict) -> tuple[str, dict]:
+            async with sem:
+                quote = await fetch_commodity_quote_async(
+                    symbol, meta, client=client, pacer=pacer
+                )
+                print(
+                    f"Fetched {symbol} via {source} ({quote.get('interval')}): "
+                    f"{quote['price']} {quote['unit']} ({quote['change_pct']:+.3f}%) "
+                    f"as of {quote['as_of']} [{len(quote.get('series') or [])} pts]"
+                )
+                return symbol, quote
+
+        print(
+            f'Fetching {len(symbols)} commodities with asyncio '
+            f'(concurrency={concurrency}, pause={pause}s, transport={transport})'
+        )
+        results = await asyncio.gather(
+            *(fetch_one(symbol, meta) for symbol, meta in symbols)
+        )
+        for symbol, quote in results:
             prices[symbol] = {
                 'price': quote['price'],
                 'unit': quote['unit'],
@@ -632,19 +750,13 @@ def fetch_market_prices(**context):
                 'history_points': len(quote.get('series') or []),
             }
             series_by_symbol[symbol] = quote.get('series') or []
-            print(
-                f"Fetched {symbol} via {source} ({quote.get('interval')}): "
-                f"{quote['price']} {quote['unit']} ({quote['change_pct']:+.3f}%) "
-                f"as of {quote['as_of']} [{prices[symbol]['history_points']} pts]"
-            )
-            if index < len(symbols) - 1 and pause > 0:
-                time.sleep(pause)
+        return prices, series_by_symbol
 
     if transport == 'rest':
-        _run(None)
+        prices, series_by_symbol = asyncio.run(_run_async(None))
     else:
         with AlphaVantageMcpClient() as client:
-            _run(client)
+            prices, series_by_symbol = client.run(_run_async(client))
 
     context['ti'].xcom_push(key='market_prices', value=prices)
     context['ti'].xcom_push(key='price_series', value=series_by_symbol)

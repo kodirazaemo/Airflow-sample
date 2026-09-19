@@ -170,6 +170,35 @@ class MockedMcpSessionTests(unittest.TestCase):
         self.assertEqual(payload['data'][0]['value'], '71.25')
         self.assertEqual(fake.calls, [('WTI', {'interval': 'monthly'})])
 
+    def test_async_helpers_run_on_client_loop(self):
+        fake = FakeSession()
+
+        @asynccontextmanager
+        async def factory(transport, api_key):
+            yield fake
+
+        async def batch(client):
+            tools = await client.list_tools_async()
+            first = await client.call_tool_async('WTI', {'interval': 'monthly'})
+            second = await client.call_tool_async('COPPER', {'interval': 'monthly'})
+            return tools, first, second
+
+        with patch.dict(os.environ, {'ALPHA_VANTAGE_API_KEY': 'secret-test-key'}):
+            with AlphaVantageMcpClient(
+                api_key='secret-test-key',
+                transport='http',
+                session_cm_factory=factory,
+            ) as client:
+                tools, first, second = client.run(batch(client))
+
+        self.assertEqual(tools, ['WTI', 'COPPER'])
+        self.assertEqual(first['data'][0]['value'], '71.25')
+        self.assertEqual(second['data'][0]['value'], '71.25')
+        self.assertEqual(
+            fake.calls,
+            [('WTI', {'interval': 'monthly'}), ('COPPER', {'interval': 'monthly'})],
+        )
+
     def test_call_tool_errors_are_redacted(self):
         @asynccontextmanager
         async def factory(transport, api_key):

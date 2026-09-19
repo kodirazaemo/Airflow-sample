@@ -231,16 +231,20 @@ class AlphaVantageMcpClient:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._session_cm = None
         self._session = None
+        # Serialize tools/call on one MCP stream; gather may still schedule many tasks.
+        self._call_lock: asyncio.Lock | None = None
 
     def __enter__(self) -> 'AlphaVantageMcpClient':
         self._loop = asyncio.new_event_loop()
         try:
             self._session_cm = self._session_cm_factory(self.transport, self.api_key)
             self._session = self._loop.run_until_complete(self._session_cm.__aenter__())
+            self._call_lock = asyncio.Lock()
         except Exception as exc:
             if self._loop is not None:
                 self._loop.close()
                 self._loop = None
+            self._call_lock = None
             raise RuntimeError(
                 f'Failed to open Alpha Vantage MCP ({self.transport}) session: '
                 f'{redact_secrets(_exception_text(exc), self.api_key)}'
@@ -260,10 +264,22 @@ class AlphaVantageMcpClient:
             self._session = None
             self._session_cm = None
             self._loop = None
+            self._call_lock = None
 
     def list_tools(self) -> list[str]:
+        return self.run(self.list_tools_async())
+
+    def call_tool(self, name: str, arguments: dict | None = None) -> dict:
+        return self.run(self.call_tool_async(name, arguments))
+
+    def run(self, coro):
+        """Run a coroutine on this client's event loop (avoid nested asyncio.run)."""
+        return self._run(coro)
+
+    async def list_tools_async(self) -> list[str]:
+        self._require_session()
         try:
-            result = self._run(self._session.list_tools())
+            result = await self._session.list_tools()
             return list_mcp_tool_names(result)
         except Exception as exc:
             raise RuntimeError(
@@ -271,9 +287,12 @@ class AlphaVantageMcpClient:
                 f'{redact_secrets(_exception_text(exc), self.api_key)}'
             ) from None
 
-    def call_tool(self, name: str, arguments: dict | None = None) -> dict:
+    async def call_tool_async(self, name: str, arguments: dict | None = None) -> dict:
+        self._require_session()
+        assert self._call_lock is not None
         try:
-            result = self._run(self._session.call_tool(name, arguments or {}))
+            async with self._call_lock:
+                result = await self._session.call_tool(name, arguments or {})
             return parse_mcp_tool_result(result)
         except Exception as exc:
             raise RuntimeError(
@@ -281,9 +300,12 @@ class AlphaVantageMcpClient:
                 f'{redact_secrets(_exception_text(exc), self.api_key)}'
             ) from None
 
-    def _run(self, coro):
+    def _require_session(self) -> None:
         if self._loop is None or self._session is None:
             raise RuntimeError('AlphaVantageMcpClient must be used as a context manager')
+
+    def _run(self, coro):
+        self._require_session()
         return self._loop.run_until_complete(coro)
 
 

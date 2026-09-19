@@ -76,7 +76,7 @@ docker compose down
 Daily pipeline (`commodity_trading_dag`) that pulls live commodity data from **Alpha Vantage MCP** and scores trades with a **weighted multi-indicator model**:
 
 1. **start_trading_session** — opens the session
-2. **fetch_market_prices** — MCP `tools/list` then `tools/call` for gold, WTI crude, wheat, copper, and natural gas (stores price history)
+2. **fetch_market_prices** — asyncio gather over gold, WTI crude, wheat, copper, and natural gas (MCP `tools/list` then paced `tools/call`; stores price history)
 3. **validate_market_data** — checks for missing/invalid quotes
 4. **compute_trading_signals** — runs separate signal functions, then combines them by weight
 5. **generate_trade_orders** — builds notional orders for actionable signals
@@ -112,7 +112,7 @@ Each indicator returns `BUY (+1)`, `SELL (-1)`, or `HOLD (0)`.
 | `COPPER` | `COPPER` | monthly only |
 | `WHEAT` | `WHEAT` | monthly only |
 
-Free-tier keys are limited (~5 requests/minute). The fetch task pauses between calls (`ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS`, default `15`). Set `ALPHA_VANTAGE_INTERVAL=daily` if your key supports daily series for gold/oil/gas.
+Free-tier keys are limited (~5 requests/minute). The fetch task uses **asyncio** (`asyncio.gather` + a request pacer) and spaces calls with `ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS` (default `15`). Keep `ALPHA_VANTAGE_FETCH_CONCURRENCY=1` on free tier; raise it for paid keys (REST parallelizes; MCP still serializes `tools/call` on one session). Set `ALPHA_VANTAGE_INTERVAL=daily` if your key supports daily series for gold/oil/gas.
 
 Use your own free API key for full coverage (including gold). The public `demo` key only works for a subset of commodity endpoints.
 
@@ -175,7 +175,8 @@ Commodity / MCP:
 - `ALPHA_VANTAGE_MCP_SSE_URL` — default `https://mcp.alphavantage.co:18080/sse`
 - `ALPHA_VANTAGE_MCP_STDIO_COMMAND` / `ALPHA_VANTAGE_MCP_STDIO_ARGS` — local stdio server (`uvx` + `marketdata-mcp-server`)
 - `ALPHA_VANTAGE_INTERVAL` — `monthly` (default) or `daily`
-- `ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS` — delay between API calls (default `15`)
+- `ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS` — min spacing between API calls (default `15`)
+- `ALPHA_VANTAGE_FETCH_CONCURRENCY` — asyncio gather concurrency (default `1`)
 - `SIGNAL_WEIGHT_MOMENTUM` / `SIGNAL_WEIGHT_MOVING_AVERAGE` / `SIGNAL_WEIGHT_RSI` / `SIGNAL_WEIGHT_MACD` / `SIGNAL_WEIGHT_OBV` — optional weight overrides
 - `SIGNAL_BUY_THRESHOLD` / `SIGNAL_SELL_THRESHOLD` — weighted-score cutoffs (defaults `0.25` / `-0.25`)
 
