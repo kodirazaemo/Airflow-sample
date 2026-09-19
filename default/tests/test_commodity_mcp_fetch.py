@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import unittest
@@ -116,6 +117,139 @@ class CommodityMcpFetchTests(unittest.TestCase):
 
         self.assertEqual(read_dag.dag.dag_id, 'alpha_vantage_mcp_read')
         self.assertEqual(self.dag_module.dag.dag_id, 'commodity_trading_dag')
+
+
+class AsyncFetchMarketPricesTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        _ensure_airflow_stubs()
+        import commodity_dag as dag_module
+
+        cls.dag_module = dag_module
+
+    def test_async_fetch_uses_gather_and_async_mcp_client(self):
+        class FakeAsyncClient:
+            def __init__(self):
+                self.calls: list[tuple[str, dict]] = []
+                self.list_calls = 0
+
+            async def list_tools_async(self):
+                self.list_calls += 1
+                return ['WTI', 'COPPER', 'WHEAT', 'NATURAL_GAS', 'GOLD_SILVER_HISTORY']
+
+            async def call_tool_async(self, name, arguments=None):
+                self.calls.append((name, arguments or {}))
+                await asyncio.sleep(0)
+                price = 10.0 + len(self.calls)
+                return {
+                    'unit': 'USD',
+                    'data': [
+                        {'date': '2024-02-01', 'value': str(price)},
+                        {'date': '2024-01-01', 'value': str(price - 1)},
+                    ],
+                }
+
+            def run(self, coro):
+                return asyncio.run(coro)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        fake = FakeAsyncClient()
+        commodities = {
+            'CRUDE_OIL': {'function': 'WTI', 'params': {'interval': 'monthly'}, 'lot_size': 1000},
+            'COPPER': {'function': 'COPPER', 'params': {'interval': 'monthly'}, 'lot_size': 25},
+        }
+        pushed = {}
+
+        class FakeTI:
+            def xcom_push(self, key, value):
+                pushed[key] = value
+
+        with patch.dict(
+            os.environ,
+            {
+                'ALPHA_VANTAGE_TRANSPORT': 'http',
+                'ALPHA_VANTAGE_API_KEY': 'secret-test-key',
+                'ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS': '0',
+                'ALPHA_VANTAGE_FETCH_CONCURRENCY': '2',
+            },
+        ):
+            with patch.object(self.dag_module, 'get_commodities', return_value=commodities):
+                with patch.object(self.dag_module, 'AlphaVantageMcpClient', return_value=fake):
+                    prices = self.dag_module.fetch_market_prices(
+                        ti=FakeTI(),
+                    )
+
+        self.assertEqual(fake.list_calls, 1)
+        self.assertEqual(len(fake.calls), 2)
+        self.assertEqual(set(prices), {'CRUDE_OIL', 'COPPER'})
+        self.assertEqual(set(pushed['market_prices']), {'CRUDE_OIL', 'COPPER'})
+        self.assertEqual(len(pushed['price_series']['CRUDE_OIL']), 2)
+        self.assertTrue(all(q['source'] == 'alpha_vantage_mcp' for q in prices.values()))
+
+    def test_async_rest_fetch_uses_to_thread(self):
+        commodities = {
+            'GOLD': {
+                'function': 'GOLD_SILVER_SPOT',
+                'params': {'symbol': 'GOLD'},
+                'lot_size': 10,
+            },
+            'WHEAT': {'function': 'WHEAT', 'params': {'interval': 'monthly'}, 'lot_size': 25},
+        }
+        rest_calls: list[tuple[str, dict]] = []
+
+        def fake_rest(function, params):
+            rest_calls.append((function, params))
+            return {
+                'unit': 'USD',
+                'data': [
+                    {'date': '2024-03-01', 'value': '100'},
+                    {'date': '2024-02-01', 'value': '90'},
+                ],
+            }
+
+        pushed = {}
+
+        class FakeTI:
+            def xcom_push(self, key, value):
+                pushed[key] = value
+
+        with patch.dict(
+            os.environ,
+            {
+                'ALPHA_VANTAGE_TRANSPORT': 'rest',
+                'ALPHA_VANTAGE_API_KEY': 'secret-test-key',
+                'ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS': '0',
+                'ALPHA_VANTAGE_FETCH_CONCURRENCY': '2',
+            },
+        ):
+            with patch.object(self.dag_module, 'get_commodities', return_value=commodities):
+                with patch.object(self.dag_module, '_alpha_vantage_rest_get', side_effect=fake_rest):
+                    prices = self.dag_module.fetch_market_prices(ti=FakeTI())
+
+        self.assertEqual(len(rest_calls), 2)
+        self.assertEqual(set(prices), {'GOLD', 'WHEAT'})
+        self.assertTrue(all(q['source'] == 'alpha_vantage_rest' for q in prices.values()))
+        self.assertIn('market_prices', pushed)
+
+    def test_request_pacer_spaces_calls(self):
+        pacer = self.dag_module._RequestPacer(0.05)
+
+        async def timed():
+            start = asyncio.get_running_loop().time()
+            await pacer.wait()
+            first = asyncio.get_running_loop().time()
+            await pacer.wait()
+            second = asyncio.get_running_loop().time()
+            return first - start, second - first
+
+        first_gap, second_gap = asyncio.run(timed())
+        self.assertLess(first_gap, 0.02)
+        self.assertGreaterEqual(second_gap, 0.04)
 
 
 if __name__ == '__main__':
