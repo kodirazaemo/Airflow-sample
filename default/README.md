@@ -61,6 +61,14 @@ ALPHA_VANTAGE_MCP_SSE_URL=https://mcp.alphavantage.co/sse
 
 ## Workflow schema
 
+**Medallion** here is a warehouse pattern (not a commodity and not an Airflow feature): raw **Bronze**, cleaned **Silver**, business-ready **Gold**. This sample maps that onto `commodity_trading_dag` tasks and Postgres schemas of the same names.
+
+| Layer | Meaning | This DAG |
+|-------|---------|----------|
+| Bronze | Immutable raw extract | `extract_bronze` → `bronze.mcp_snapshots` |
+| Silver | Validated / typed tables | `transform_silver` → `silver.commodity_quotes` |
+| Gold | Metrics a BI tool can read | `compute_gold` → `gold.commodity_metrics`; `score_obv_data_quality` → `gold.obv_quality` |
+
 How Connection `alpha_vantage_default` feeds bronze, then the `commodity_trading_dag` task graph (names match `commodity_dag.py`).
 
 ```mermaid
