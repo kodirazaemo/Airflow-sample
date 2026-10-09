@@ -39,11 +39,14 @@ x-airflow-common: &airflow-common
     ALPHA_VANTAGE_MCP_STDIO_COMMAND: ${ALPHA_VANTAGE_MCP_STDIO_COMMAND:-uvx}
     ALPHA_VANTAGE_MCP_STDIO_ARGS: ${ALPHA_VANTAGE_MCP_STDIO_ARGS:-marketdata-mcp-server}
     MEDALLION_DATA_DIR: /app/data/medallion
+    AIRFLOW__CORE__PLUGINS_FOLDER: /app/plugins
+    PYTHONPATH: /app/dags:/app/plugins
   extra_hosts:
     - "mcp.alphavantage.co:host-gateway"
     - "host.docker.internal:host-gateway"
   volumes:
     - ./dags:/app/dags
+    - ./plugins:/app/plugins
     - ./logs:/app/logs
     - ./data:/app/data
 

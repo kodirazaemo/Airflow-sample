@@ -26,7 +26,7 @@ PY
 
 # Seed Connection alpha_vantage_default from env (idempotent add-or-update).
 # Password is never printed. Production should use an Airflow secrets backend.
-export PYTHONPATH="${PYTHONPATH:-}:/app/dags"
+export PYTHONPATH="${PYTHONPATH:-}:/app/dags:/app/plugins"
 python - <<'PY'
 from alpha_vantage_mcp import (
     ALPHA_VANTAGE_CONN_ID,

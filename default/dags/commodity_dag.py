@@ -3,10 +3,11 @@ Commodity trading sample DAG (medallion layout).
 
 Daily pipeline that:
 1. Bronze — extracts raw Alpha Vantage MCP payloads to immutable snapshots
-2. Silver — validates bronze (schema / nulls) and writes cleaned tables
-3. Gold — SQL business metrics a BI tool can read, plus weighted signals
-4. Compares synthetic-volume OBV against historical price trend lines
-5. Generates trade recommendations and a daily report
+2. Profile — custom plugin stats on bronze before silver (fail/warn)
+3. Silver — validates bronze (schema / nulls) and writes cleaned tables
+4. Gold — SQL business metrics a BI tool can read, plus weighted signals
+5. Compares synthetic-volume OBV against historical price trend lines
+6. Generates trade recommendations and a daily report
 
 Auth: Airflow Connection ``alpha_vantage_default`` (seeded from .env on boot).
 Set ALPHA_VANTAGE_TRANSPORT=rest to use the legacy www.alphavantage.co REST API.
@@ -16,11 +17,13 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
@@ -37,6 +40,16 @@ from medallion import (
     replace_silver_symbol,
     upsert_obv_quality,
     write_bronze_snapshot,
+)
+
+_PLUGIN_DIR = Path(__file__).resolve().parents[1] / 'plugins'
+if _PLUGIN_DIR.is_dir() and str(_PLUGIN_DIR) not in sys.path:
+    sys.path.insert(0, str(_PLUGIN_DIR))
+
+from bronze_data_profiler import (  # noqa: E402
+    assert_profiles_acceptable,
+    profile_bronze_record,
+    summarize_profiles,
 )
 
 default_args = {
@@ -815,6 +828,42 @@ def extract_bronze(**context):
     return summary
 
 
+def profile_bronze(**context):
+    """
+    Profile bronze snapshots before silver.
+
+    Hard errors (missing / unparseable / empty numeric series) fail the task
+    unless BRONZE_PROFILE_FAIL_ON_ERROR=false. Short series and placeholder
+    rates warn only so spot-fallback sample runs still complete.
+    """
+    init_warehouse()
+    ds = context['ds']
+    commodities = get_commodities()
+    profiles = []
+    for symbol in commodities:
+        try:
+            bronze = load_bronze_snapshot(ds, symbol)
+        except FileNotFoundError:
+            bronze = None
+        profile = profile_bronze_record(symbol, bronze)
+        profiles.append(profile)
+        print(
+            f"Bronze profile {symbol}: {profile['severity']} "
+            f"rows={profile['row_count']} numeric={profile['numeric_count']} "
+            f"min={profile['min_price']} max={profile['max_price']}"
+        )
+        for warning in profile.get('warnings') or []:
+            print(f'  WARN {symbol}: {warning}')
+        for issue in profile.get('issues') or []:
+            print(f'  ERROR {symbol}: {issue}')
+
+    summary = summarize_profiles(profiles)
+    summary['trading_date'] = ds
+    assert_profiles_acceptable(summary)
+    context['ti'].xcom_push(key='bronze_profile', value=summary)
+    return summary
+
+
 def transform_silver(**context):
     """Silver: validate bronze payloads (schema / nulls) and write cleaned tables."""
     init_warehouse()
@@ -1060,8 +1109,8 @@ with DAG(
     dag_id='commodity_trading_dag',
     default_args=default_args,
     description=(
-        'Commodity medallion pipeline: bronze MCP snapshots, silver quotes, '
-        'gold SQL metrics, OBV data-quality vs price trend'
+        'Commodity medallion pipeline: bronze MCP snapshots, bronze profile, '
+        'silver quotes, gold SQL metrics, OBV data-quality vs price trend'
     ),
     start_date=datetime(2024, 1, 1),
     schedule=timedelta(days=1),
@@ -1077,6 +1126,11 @@ with DAG(
     bronze = PythonOperator(
         task_id='extract_bronze',
         python_callable=extract_bronze,
+    )
+
+    bronze_profile = PythonOperator(
+        task_id='profile_bronze',
+        python_callable=profile_bronze,
     )
 
     silver = PythonOperator(
@@ -1109,4 +1163,4 @@ with DAG(
         python_callable=close_trading_session,
     )
 
-    start >> bronze >> silver >> gold >> obv_quality >> generate_orders >> publish_report >> end
+    start >> bronze >> bronze_profile >> silver >> gold >> obv_quality >> generate_orders >> publish_report >> end
