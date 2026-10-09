@@ -11,9 +11,13 @@ from unittest.mock import patch
 
 from alpha_vantage_mcp import (
     ALPHA_VANTAGE_CONN_ID,
+    DEFAULT_FORWARDER_MCP_HTTP_URL,
+    DEFAULT_MCP_HTTP_URL,
+    DEFAULT_MCP_SSE_URL,
     AlphaVantageMcpClient,
     compose_connection_extra,
     connection_import_document,
+    format_mcp_connect_failure,
     get_api_key,
     get_transport,
     list_mcp_tool_names,
@@ -23,6 +27,7 @@ from alpha_vantage_mcp import (
     parse_mcp_tool_result,
     redact_secrets,
     stdio_server_spec,
+    uses_host_mcp_forwarder,
 )
 
 
@@ -74,6 +79,23 @@ class TransportConfigTests(unittest.TestCase):
         with patch.dict(os.environ, {'ALPHA_VANTAGE_TRANSPORT': 'ftp'}):
             with self.assertRaises(ValueError):
                 get_transport()
+
+    def test_default_mcp_urls_are_direct_not_forwarder(self):
+        with patch.dict(os.environ, {}, clear=True):
+            os.environ.pop('ALPHA_VANTAGE_MCP_URL', None)
+            os.environ.pop('ALPHA_VANTAGE_MCP_SSE_URL', None)
+            with patch('alpha_vantage_mcp._connection_or_none', return_value=None):
+                extra = compose_connection_extra()
+                settings = load_alpha_vantage_settings()
+                http_url = mcp_http_url('secret-test-key')
+        self.assertEqual(extra['mcp_url'], DEFAULT_MCP_HTTP_URL)
+        self.assertEqual(extra['mcp_sse_url'], DEFAULT_MCP_SSE_URL)
+        self.assertEqual(settings['mcp_url'], DEFAULT_MCP_HTTP_URL)
+        self.assertNotIn(':18080', extra['mcp_url'])
+        self.assertTrue(http_url.startswith('https://mcp.alphavantage.co/mcp'))
+        self.assertNotIn(':18080', http_url)
+        self.assertFalse(uses_host_mcp_forwarder(DEFAULT_MCP_HTTP_URL))
+        self.assertTrue(uses_host_mcp_forwarder(DEFAULT_FORWARDER_MCP_HTTP_URL))
 
     def test_http_url_puts_apikey_in_query_but_redacts_logs(self):
         url = mcp_http_url('secret-test-key')
@@ -139,27 +161,95 @@ class TransportConfigTests(unittest.TestCase):
         self.assertEqual(settings['mcp_url'], 'https://mcp.alphavantage.co:18080/mcp')
         self.assertEqual(settings['mcp_sse_url'], 'https://mcp.alphavantage.co:18080/sse')
 
-    def test_connection_seed_document_uses_compose_mcp_urls(self):
+    def test_connection_seed_document_defaults_to_direct_mcp_urls(self):
         with patch.dict(
             os.environ,
             {
                 'ALPHA_VANTAGE_API_KEY': 'secret-test-key',
                 'ALPHA_VANTAGE_TRANSPORT': 'http',
-                'ALPHA_VANTAGE_MCP_URL': 'https://mcp.alphavantage.co:18080/mcp',
-                'ALPHA_VANTAGE_MCP_SSE_URL': 'https://mcp.alphavantage.co:18080/sse',
             },
             clear=True,
         ):
             extra = compose_connection_extra()
             doc = connection_import_document()
-        self.assertEqual(extra['mcp_url'], 'https://mcp.alphavantage.co:18080/mcp')
-        self.assertEqual(extra['mcp_sse_url'], 'https://mcp.alphavantage.co:18080/sse')
+        self.assertEqual(extra['mcp_url'], DEFAULT_MCP_HTTP_URL)
+        self.assertEqual(extra['mcp_sse_url'], DEFAULT_MCP_SSE_URL)
         self.assertIn(ALPHA_VANTAGE_CONN_ID, doc)
         self.assertEqual(doc[ALPHA_VANTAGE_CONN_ID]['password'], 'secret-test-key')
         self.assertEqual(doc[ALPHA_VANTAGE_CONN_ID]['conn_type'], 'generic')
         parsed_extra = json.loads(doc[ALPHA_VANTAGE_CONN_ID]['extra'])
         self.assertEqual(parsed_extra['transport'], 'http')
         self.assertEqual(parsed_extra['mcp_url'], extra['mcp_url'])
+
+    def test_connection_seed_honors_forwarder_env_override(self):
+        with patch.dict(
+            os.environ,
+            {
+                'ALPHA_VANTAGE_API_KEY': 'secret-test-key',
+                'ALPHA_VANTAGE_MCP_URL': DEFAULT_FORWARDER_MCP_HTTP_URL,
+                'ALPHA_VANTAGE_MCP_SSE_URL': 'https://mcp.alphavantage.co:18080/sse',
+            },
+            clear=True,
+        ):
+            extra = compose_connection_extra()
+        self.assertEqual(extra['mcp_url'], DEFAULT_FORWARDER_MCP_HTTP_URL)
+        self.assertTrue(uses_host_mcp_forwarder(extra['mcp_url']))
+
+    def test_connect_failure_includes_url_transport_and_desktop_hint(self):
+        with patch.dict(os.environ, {'ALPHA_VANTAGE_API_KEY': 'secret-test-key'}, clear=True):
+            with patch('alpha_vantage_mcp._connection_or_none', return_value=None):
+                message = format_mcp_connect_failure(
+                    'http',
+                    'secret-test-key',
+                    RuntimeError('All connection attempts failed'),
+                )
+        self.assertIn('http', message)
+        self.assertIn(DEFAULT_MCP_HTTP_URL, message)
+        self.assertIn('All connection attempts failed', message)
+        self.assertIn('direct Streamable HTTP', message)
+        self.assertIn('Docker Desktop', message)
+        self.assertIn('WSL', message)
+        self.assertNotIn('secret-test-key', message)
+
+    def test_connect_failure_forwarder_url_tells_desktop_to_drop_port(self):
+        with patch.dict(
+            os.environ,
+            {
+                'ALPHA_VANTAGE_API_KEY': 'secret-test-key',
+                'ALPHA_VANTAGE_MCP_URL': DEFAULT_FORWARDER_MCP_HTTP_URL,
+            },
+            clear=True,
+        ):
+            with patch('alpha_vantage_mcp._connection_or_none', return_value=None):
+                message = format_mcp_connect_failure(
+                    'http',
+                    'secret-test-key',
+                    RuntimeError('unhandled errors in a TaskGroup'),
+                )
+        self.assertIn(':18080', message)
+        self.assertIn('network_mode: host', message)
+        self.assertIn('https://mcp.alphavantage.co/mcp', message)
+        self.assertNotIn('secret-test-key', message)
+
+    def test_client_enter_wraps_connect_failure(self):
+        @asynccontextmanager
+        async def factory(transport, api_key):
+            raise RuntimeError('All connection attempts failed')
+            yield  # pragma: no cover
+
+        with patch.dict(
+            os.environ,
+            {'ALPHA_VANTAGE_API_KEY': 'secret-test-key', 'ALPHA_VANTAGE_TRANSPORT': 'http'},
+            clear=True,
+        ):
+            with patch('alpha_vantage_mcp._connection_or_none', return_value=None):
+                with self.assertRaises(RuntimeError) as raised:
+                    with AlphaVantageMcpClient(session_cm_factory=factory):
+                        pass
+        self.assertIn('Failed to open Alpha Vantage MCP (http)', str(raised.exception))
+        self.assertIn('All connection attempts failed', str(raised.exception))
+        self.assertIn(DEFAULT_MCP_HTTP_URL, str(raised.exception))
+        self.assertNotIn('secret-test-key', str(raised.exception))
 
 
 class ParseResultTests(unittest.TestCase):

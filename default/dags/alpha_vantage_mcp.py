@@ -32,9 +32,9 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 DEFAULT_MCP_HTTP_URL = 'https://mcp.alphavantage.co/mcp'
 DEFAULT_MCP_SSE_URL = 'https://mcp.alphavantage.co/sse'
-# Compose / .env.example forwarder defaults (host-network TCP 18080).
-DEFAULT_COMPOSE_MCP_HTTP_URL = 'https://mcp.alphavantage.co:18080/mcp'
-DEFAULT_COMPOSE_MCP_SSE_URL = 'https://mcp.alphavantage.co:18080/sse'
+# Opt-in host-network forwarder (Linux/CI bridges that cannot SNAT). Not the default.
+DEFAULT_FORWARDER_MCP_HTTP_URL = 'https://mcp.alphavantage.co:18080/mcp'
+DEFAULT_FORWARDER_MCP_SSE_URL = 'https://mcp.alphavantage.co:18080/sse'
 DEFAULT_STDIO_COMMAND = 'uvx'
 DEFAULT_STDIO_ARGS = ('marketdata-mcp-server',)
 ALPHA_VANTAGE_CONN_ID = 'alpha_vantage_default'
@@ -193,21 +193,66 @@ def mcp_sse_url(api_key: str | None = None) -> str:
 
 
 def compose_connection_extra() -> dict[str, str]:
-    """Extras seeded into Connection alpha_vantage_default (compose MCP URLs)."""
+    """Extras seeded into Connection alpha_vantage_default (direct MCP URLs by default)."""
     transport = os.environ.get('ALPHA_VANTAGE_TRANSPORT', 'http').strip() or 'http'
     mcp_url = (
         os.environ.get('ALPHA_VANTAGE_MCP_URL', '').strip()
-        or DEFAULT_COMPOSE_MCP_HTTP_URL
+        or DEFAULT_MCP_HTTP_URL
     )
     mcp_sse_url = (
         os.environ.get('ALPHA_VANTAGE_MCP_SSE_URL', '').strip()
-        or DEFAULT_COMPOSE_MCP_SSE_URL
+        or DEFAULT_MCP_SSE_URL
     )
     return {
         'transport': transport,
         'mcp_url': mcp_url,
         'mcp_sse_url': mcp_sse_url,
     }
+
+
+def mcp_connect_endpoint(transport: str | None = None) -> str:
+    """Public MCP URL (no apikey) or stdio label for logs and connect errors."""
+    resolved = transport or get_transport()
+    if resolved == 'http':
+        return load_alpha_vantage_settings()['mcp_url']
+    if resolved == 'sse':
+        return load_alpha_vantage_settings()['mcp_sse_url']
+    if resolved == 'stdio':
+        return 'stdio:uvx marketdata-mcp-server'
+    return resolved
+
+
+def uses_host_mcp_forwarder(url: str) -> bool:
+    """True when the MCP URL targets the opt-in host-network :18080 forwarder."""
+    host = urlsplit(url).netloc.lower()
+    return host.endswith(':18080') or ':18080' in host
+
+
+def format_mcp_connect_failure(transport: str, api_key: str, exc: BaseException) -> str:
+    """Redacted connect error with URL, transport, and Desktop vs WSL/Linux hint."""
+    endpoint = mcp_connect_endpoint(transport)
+    redacted_endpoint = redact_secrets(endpoint, api_key)
+    detail = redact_secrets(_exception_text(exc), api_key)
+    if uses_host_mcp_forwarder(endpoint):
+        hint = (
+            'This URL uses the opt-in host-network MCP forwarder (:18080). '
+            'Docker Desktop (Windows/Mac) cannot use network_mode: host and that path fails. '
+            'Set ALPHA_VANTAGE_MCP_URL=https://mcp.alphavantage.co/mcp (no :18080) and run '
+            'without docker-compose.mcp-forwarder.yml. Prefer Linux or WSL if Desktop '
+            'port forwarding still fails.'
+        )
+    else:
+        hint = (
+            'Default is a direct Streamable HTTP session to https://mcp.alphavantage.co/mcp '
+            '(no host-network forwarder). Docker Desktop (Windows) should keep this URL. '
+            'If the compose bridge cannot SNAT (some Linux/CI VMs), opt in: '
+            'docker compose -f docker-compose.yml -f docker-compose.mcp-forwarder.yml up -d. '
+            'Prefer Linux or WSL if the Airflow UI ports fail on Desktop.'
+        )
+    return (
+        f'Failed to open Alpha Vantage MCP ({transport}) session to {redacted_endpoint}: '
+        f'{detail}. {hint}'
+    )
 
 
 def connection_import_document() -> dict:
@@ -423,8 +468,7 @@ class AlphaVantageMcpClient:
                 self._loop.close()
                 self._loop = None
             raise RuntimeError(
-                f'Failed to open Alpha Vantage MCP ({self.transport}) session: '
-                f'{redact_secrets(_exception_text(exc), self.api_key)}'
+                format_mcp_connect_failure(self.transport, self.api_key, exc)
             ) from None
         return self
 

@@ -6,7 +6,7 @@ Containerized **Apache Airflow 3.3.1** (Python 3.12) with PostgreSQL, Redis, and
 
 **Prerequisites:** Docker Compose, a free [Alpha Vantage API key](https://www.alphavantage.co/support/#api-key), local Python **3.12+** for tests.
 
-> **Where to run Compose:** use **Linux** or **WSL on Windows**. **Docker Desktop (Windows)** has hit connection / port-forwarding issues with this stack (Airflow UI on `8080` and/or the MCP host-network forwarder). Prefer a Linux Docker engine or Docker Desktop’s **WSL backend**, not Desktop’s Windows port forwarding. Mac/Windows still cannot use `network_mode: host` — see [Docker Desktop vs host-network forwarder](#docker-desktop-vs-host-network-forwarder) for the direct MCP URL workaround; that note still applies.
+> **Where to run Compose:** **Linux** or **WSL on Windows** is safest for the Airflow UI (`8080`). **MCP defaults to a direct** `https://mcp.alphavantage.co/mcp` session — no host-network forwarder. **Docker Desktop (Windows)** has hit UI port-forwarding issues and the old `:18080` forwarder path fails (`network_mode: host` is unsupported). Prefer a Linux engine or Desktop’s **WSL backend**, not Desktop’s Windows port forwarding. See [MCP URL (direct vs opt-in forwarder)](#mcp-url-direct-vs-opt-in-forwarder).
 
 ```bash
 cp .env.example .env
@@ -28,8 +28,8 @@ docker compose down
 |-------|--------|
 | conn-password | `ALPHA_VANTAGE_API_KEY` |
 | extra `transport` | `ALPHA_VANTAGE_TRANSPORT` (default `http`) |
-| extra `mcp_url` | compose default `https://mcp.alphavantage.co:18080/mcp` |
-| extra `mcp_sse_url` | compose default `https://mcp.alphavantage.co:18080/sse` |
+| extra `mcp_url` | compose default `https://mcp.alphavantage.co/mcp` |
+| extra `mcp_sse_url` | compose default `https://mcp.alphavantage.co/sse` |
 
 Tasks read the key and extras with `BaseHook.get_connection('alpha_vantage_default')` (metadata DB fallback outside a task; env fallback for unit tests). Compose pins `AIRFLOW__CORE__FERNET_KEY` so every service can decrypt the password.
 
@@ -44,19 +44,28 @@ Production: use an Airflow secrets backend. Do not rely on `.env`. The key is ne
 | `stdio` | Local `uvx marketdata-mcp-server` (needs `uvx`) |
 | `rest` | Legacy `www.alphavantage.co/query` (not MCP) |
 
-### Docker Desktop vs host-network forwarder
+### MCP URL (direct vs opt-in forwarder)
 
-Compose includes `mcp-https-forwarder` (`host:18080` → `mcp.alphavantage.co:443`) and `extra_hosts` so Airflow containers keep the TLS name `mcp.alphavantage.co`. Use this when the **compose bridge cannot SNAT** to the public internet (nested VMs, some CI). That is separate from `net.bridge.bridge-nf-call-iptables=0`, which only affects container-to-container traffic.
+**Default:** containers call **direct** `https://mcp.alphavantage.co/mcp` (SSE: `/sse`). That is the path for Docker Desktop, WSL, and any engine that can SNAT to the internet. Compose does **not** start `mcp-https-forwarder` and does **not** map `mcp.alphavantage.co` to `host-gateway` (that mapping sent Desktop traffic to the Windows host instead of Cloudflare).
 
-**Docker Desktop (Mac/Windows)** does not support `network_mode: host`. Skip the forwarder and talk to Cloudflare directly:
+**Docker Desktop (Mac/Windows)** does not support `network_mode: host`. Do not enable the forwarder override on Desktop.
 
 ```bash
-# in .env
+# in .env (these are also the compose defaults)
 ALPHA_VANTAGE_MCP_URL=https://mcp.alphavantage.co/mcp
 ALPHA_VANTAGE_MCP_SSE_URL=https://mcp.alphavantage.co/sse
 ```
 
-**Additional Windows Desktop caveat** (from real use): even with those URLs, published ports and the MCP forwarder have failed under Docker Desktop’s Windows port forwarding. Run Compose from **Linux** or **WSL** instead. This does not replace the host-network note above.
+**Opt-in host-network forwarder** (Linux/CI bridges that cannot SNAT): `host:18080` → `mcp.alphavantage.co:443` plus `extra_hosts`. Separate from `net.bridge.bridge-nf-call-iptables=0` (container-to-container only).
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.mcp-forwarder.yml up -d --build
+# and in .env:
+# ALPHA_VANTAGE_MCP_URL=https://mcp.alphavantage.co:18080/mcp
+# ALPHA_VANTAGE_MCP_SSE_URL=https://mcp.alphavantage.co:18080/sse
+```
+
+**Windows Desktop UI caveat** (from real use): published ports such as Airflow `8080` can still fail under Desktop’s Windows port forwarding even with a working MCP URL. Run Compose from **Linux** or **WSL** for the UI.
 
 ## Sample DAGs
 
@@ -159,7 +168,8 @@ Free-tier ~5 req/min; pause defaults to 15s (`ALPHA_VANTAGE_REQUEST_PAUSE_SECOND
 ```
 default/                       # this Airflow project
 ├── Dockerfile
-├── docker-compose.yml      # api-server, scheduler, dag-processor, postgres, redis, MCP forwarder
+├── docker-compose.yml      # api-server, scheduler, dag-processor, postgres, redis (direct MCP)
+├── docker-compose.mcp-forwarder.yml  # opt-in host-network MCP forwarder (Linux/CI)
 ├── entrypoint.sh           # migrate, admin user, Connection seed, warehouse DDL
 ├── requirements.txt
 ├── .env.example
@@ -182,7 +192,7 @@ See `docker-compose.yml` for Airflow. Commodity / MCP:
 
 - `ALPHA_VANTAGE_API_KEY` — seeds Connection `alpha_vantage_default` (do not commit `.env`)
 - `ALPHA_VANTAGE_TRANSPORT` — `http` / `sse` / `stdio` / `rest`
-- `ALPHA_VANTAGE_MCP_URL` / `ALPHA_VANTAGE_MCP_SSE_URL` — forwarder defaults `:18080`; Desktop: URLs without the port
+- `ALPHA_VANTAGE_MCP_URL` / `ALPHA_VANTAGE_MCP_SSE_URL` — default `https://mcp.alphavantage.co/mcp` and `/sse`; `:18080` only with the forwarder override
 - `MEDALLION_DATA_DIR` — default `/app/data/medallion`
 - `ALPHA_VANTAGE_INTERVAL` — `monthly` (default) or `daily`
 - `ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS` — default `15`
