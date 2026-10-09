@@ -20,6 +20,8 @@ cp .env.example .env
 - **conn-password** — `ALPHA_VANTAGE_API_KEY` (local seed only)
 - **conn extra** — `transport`, `mcp_url`, `mcp_sse_url` (compose forwarder defaults: `https://mcp.alphavantage.co:18080/mcp` and `/sse`)
 
+Compose pins `AIRFLOW__CORE__FERNET_KEY` so every Airflow service can decrypt that connection password. Override it outside local compose.
+
 Tasks resolve the key and MCP extras with `BaseHook.get_connection('alpha_vantage_default')`. `.env` is not the runtime source of truth; it only seeds the connection for local compose. Production should store the password in an Airflow secrets backend instead of an env file.
 
 The sample authenticates to the [Alpha Vantage MCP server](https://mcp.alphavantage.co/#connection-examples) using that connection. Interactive OAuth is for desktop MCP clients; Airflow uses the documented API-key connection patterns:
