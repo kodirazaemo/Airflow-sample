@@ -32,18 +32,19 @@ import json
 import os
 import subprocess
 import tempfile
+from pathlib import Path
 
 from alpha_vantage_mcp import ALPHA_VANTAGE_CONN_ID, connection_import_document, redact_secrets
 from medallion import init_warehouse
 
 doc = connection_import_document()
 password = doc[ALPHA_VANTAGE_CONN_ID].get("password") or ""
-if not password:
-    print(
-        f"Skipping {ALPHA_VANTAGE_CONN_ID} seed: ALPHA_VANTAGE_API_KEY is empty. "
-        "Set it in .env for local compose."
-    )
-else:
+lock_dir = Path(os.environ.get("MEDALLION_DATA_DIR", "/app/data/medallion")).parent
+lock_dir.mkdir(parents=True, exist_ok=True)
+lock_path = lock_dir / ".alpha_vantage_conn.lock"
+
+
+def _seed() -> None:
     fd, path = tempfile.mkstemp(prefix="alpha_vantage_conn_", suffix=".json")
     try:
         with os.fdopen(fd, "w") as handle:
@@ -52,18 +53,32 @@ else:
             ["airflow", "connections", "import", "--overwrite", path],
             stdout=subprocess.DEVNULL,
         )
-        print(
-            f"Seeded Airflow connection {ALPHA_VANTAGE_CONN_ID} "
-            "(conn-password from env; extra transport/mcp_url; secret not logged)"
-        )
-    except Exception as exc:
-        print(redact_secrets(f"Failed to seed {ALPHA_VANTAGE_CONN_ID}: {exc}", password))
-        raise
     finally:
         try:
             os.remove(path)
         except OSError:
             pass
+
+
+if not password:
+    print(
+        f"Skipping {ALPHA_VANTAGE_CONN_ID} seed: ALPHA_VANTAGE_API_KEY is empty. "
+        "Set it in .env for local compose."
+    )
+else:
+    import fcntl
+
+    with lock_path.open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            _seed()
+            print(
+                f"Seeded Airflow connection {ALPHA_VANTAGE_CONN_ID} "
+                "(conn-password from env; extra transport/mcp_url; secret not logged)"
+            )
+        except Exception as exc:
+            print(redact_secrets(f"Failed to seed {ALPHA_VANTAGE_CONN_ID}: {exc}", password))
+            raise
 
 init_warehouse()
 print("Medallion warehouse ready (bronze/silver/gold)")

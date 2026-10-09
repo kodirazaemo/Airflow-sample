@@ -20,6 +20,9 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
     AIRFLOW__API__BASE_URL: http://localhost:8080
     AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:-commodity-sample-jwt-secret}
+    # Shared Fernet key so Connection passwords decrypt on every service.
+    # Local-only default; override in production / secrets backend.
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY:-55ir7VFGb59SQmx1wFDA7e-SOCPAIoSAk6_5EaF83xw=}
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
     ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:-demo}
     ALPHA_VANTAGE_KEY: ${ALPHA_VANTAGE_KEY:-}
