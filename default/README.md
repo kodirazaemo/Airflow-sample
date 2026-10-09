@@ -59,6 +59,44 @@ ALPHA_VANTAGE_MCP_SSE_URL=https://mcp.alphavantage.co/sse
 1. Enable and trigger **`alpha_vantage_mcp_read`** (manual): `list_mcp_tools` (`tools/list`) then `read_wti_monthly` (`tools/call` WTI monthly).
 2. Daily **`commodity_trading_dag`** — medallion pipeline for gold, WTI, wheat, copper, natural gas.
 
+## Workflow schema
+
+How Connection `alpha_vantage_default` feeds bronze, then the `commodity_trading_dag` task graph (names match `commodity_dag.py`).
+
+```mermaid
+flowchart LR
+  env[".env ALPHA_VANTAGE_API_KEY"] --> entry["entrypoint.sh upsert"]
+  entry --> conn["alpha_vantage_default"]
+  conn --> hook["BaseHook.get_connection"]
+  hook --> client["AlphaVantageMcpClient"]
+  client --> mcp["MCP tools/list + tools/call"]
+  exists{"bronze snapshot exists?"}
+  mcp --> exists
+  exists -->|no| write["write_bronze_snapshot"]
+  exists -->|yes skip MCP| reuse["reuse bronze.mcp_snapshots"]
+  write --> snap["bronze.mcp_snapshots"]
+  reuse --> snap
+```
+
+`extract_bronze` opens `AlphaVantageMcpClient` only when a symbol still needs a fetch (`ALPHA_VANTAGE_TRANSPORT=rest` uses `_alpha_vantage_rest_get` instead of MCP).
+
+```mermaid
+flowchart LR
+  start["start_trading_session"] --> bronze["extract_bronze"]
+  bronze --> silver["transform_silver"]
+  silver --> gold["compute_gold"]
+  gold --> obv["score_obv_data_quality"]
+  obv --> orders["generate_trade_orders"]
+  orders --> report["publish_daily_report"]
+  report --> close["close_trading_session"]
+  bronze -.-> btbl["bronze.mcp_snapshots"]
+  silver -.-> stbl["silver.commodity_quotes"]
+  gold -.-> gtbl["gold.commodity_metrics"]
+  obv -.-> qtbl["gold.obv_quality"]
+```
+
+`score_obv_data_quality` is a dedicated task after `compute_gold` in this DAG. Silver also writes `silver.commodity_price_series`; gold SQL is `compute_gold_metrics_sql`.
+
 ## Medallion (`commodity_trading_dag`)
 
 Postgres schemas `bronze` / `silver` / `gold` (same instance as Airflow metadata) plus JSON under `data/medallion/`.
