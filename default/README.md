@@ -6,6 +6,8 @@ Containerized **Apache Airflow 3.3.1** (Python 3.12) with PostgreSQL, Redis, and
 
 **Prerequisites:** Docker Compose, a free [Alpha Vantage API key](https://www.alphavantage.co/support/#api-key), local Python **3.12+** for tests.
 
+> **Where to run Compose:** use **Linux** or **WSL on Windows**. **Docker Desktop (Windows)** has hit connection / port-forwarding issues with this stack (Airflow UI on `8080` and/or the MCP host-network forwarder). Prefer a Linux Docker engine or Docker Desktop’s **WSL backend**, not Desktop’s Windows port forwarding. Mac/Windows still cannot use `network_mode: host` — see [Docker Desktop vs host-network forwarder](#docker-desktop-vs-host-network-forwarder) for the direct MCP URL workaround; that note still applies.
+
 ```bash
 cp .env.example .env
 # Set ALPHA_VANTAGE_API_KEY — never commit .env
@@ -53,6 +55,8 @@ Compose includes `mcp-https-forwarder` (`host:18080` → `mcp.alphavantage.co:44
 ALPHA_VANTAGE_MCP_URL=https://mcp.alphavantage.co/mcp
 ALPHA_VANTAGE_MCP_SSE_URL=https://mcp.alphavantage.co/sse
 ```
+
+**Additional Windows Desktop caveat** (from real use): even with those URLs, published ports and the MCP forwarder have failed under Docker Desktop’s Windows port forwarding. Run Compose from **Linux** or **WSL** instead. This does not replace the host-network note above.
 
 ## Sample DAGs
 
