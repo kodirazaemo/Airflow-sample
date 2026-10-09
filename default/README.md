@@ -66,6 +66,7 @@ ALPHA_VANTAGE_MCP_SSE_URL=https://mcp.alphavantage.co/sse
 | Layer | Meaning | This DAG |
 |-------|---------|----------|
 | Bronze | Immutable raw extract | `extract_bronze` → `bronze.mcp_snapshots` |
+| Profile | Stats / fail-or-warn before silver | `profile_bronze` (plugin `bronze_data_profiler`) |
 | Silver | Validated / typed tables | `transform_silver` → `silver.commodity_quotes` |
 | Gold | Metrics a BI tool can read | `compute_gold` → `gold.commodity_metrics`; `score_obv_data_quality` → `gold.obv_quality` |
 
@@ -91,19 +92,21 @@ flowchart LR
 ```mermaid
 flowchart LR
   start["start_trading_session"] --> bronze["extract_bronze"]
-  bronze --> silver["transform_silver"]
+  bronze --> profile["profile_bronze"]
+  profile --> silver["transform_silver"]
   silver --> gold["compute_gold"]
   gold --> obv["score_obv_data_quality"]
   obv --> orders["generate_trade_orders"]
   orders --> report["publish_daily_report"]
   report --> close["close_trading_session"]
   bronze -.-> btbl["bronze.mcp_snapshots"]
+  profile -.-> plugin["plugins/bronze_data_profiler.py"]
   silver -.-> stbl["silver.commodity_quotes"]
   gold -.-> gtbl["gold.commodity_metrics"]
   obv -.-> qtbl["gold.obv_quality"]
 ```
 
-`score_obv_data_quality` is a dedicated task after `compute_gold` in this DAG. Silver also writes `silver.commodity_price_series`; gold SQL is `compute_gold_metrics_sql`.
+`profile_bronze` is a custom plugin module (`plugins/bronze_data_profiler.py`) that runs after bronze and before silver. Missing or unparseable snapshots fail the task (set `BRONZE_PROFILE_FAIL_ON_ERROR=false` to warn-only). Short series (e.g. GOLD spot fallback) and high placeholder rates warn so the sample still runs. `score_obv_data_quality` remains after `compute_gold`. Silver also writes `silver.commodity_price_series`; gold SQL is `compute_gold_metrics_sql`.
 
 ## Medallion (`commodity_trading_dag`)
 
@@ -112,6 +115,7 @@ Postgres schemas `bronze` / `silver` / `gold` (same instance as Airflow metadata
 | Task | Layer | What it writes |
 |------|-------|----------------|
 | `extract_bronze` | Bronze | Immutable MCP/REST payload (`bronze.mcp_snapshots` + `data/medallion/bronze/<ds>/<symbol>.json`). **Skips MCP** if that snapshot already exists. |
+| `profile_bronze` | Quality | Row counts, numeric coverage, placeholder rate, duplicate dates. **Errors fail**; short/sparse series **warn**. |
 | `transform_silver` | Silver | Schema / nulls / non-positive checks → `silver.commodity_quotes`, `silver.commodity_price_series` |
 | `compute_gold` | Gold | **SQL** metrics in `gold.commodity_metrics` (latest/min/max/avg, count, period return) plus weighted signals |
 | `score_obv_data_quality` | Gold | Synthetic-volume `compute_obv_signal` vs linear price trend → `gold.obv_quality` |
@@ -149,7 +153,7 @@ Free-tier ~5 req/min; pause defaults to 15s (`ALPHA_VANTAGE_REQUEST_PAUSE_SECOND
 ## Project structure
 
 ```
-.
+default/                       # this Airflow project
 ├── Dockerfile
 ├── docker-compose.yml      # api-server, scheduler, dag-processor, postgres, redis, MCP forwarder
 ├── entrypoint.sh           # migrate, admin user, Connection seed, warehouse DDL
@@ -161,7 +165,11 @@ Free-tier ~5 req/min; pause defaults to 15s (`ALPHA_VANTAGE_REQUEST_PAUSE_SECOND
 │   ├── alpha_vantage_mcp_read_dag.py
 │   ├── commodity_dag.py
 │   └── sample_dag.py
-└── tests/                  # mocked MCP; no live key
+├── plugins/
+│   └── bronze_data_profiler.py        # Bronze → Silver profiling
+└── tests/                  # mocked MCP + profiler; no live key
+
+terraform/                  # repo-root sibling of default/: optional AWS S3 (+ RDS)
 ```
 
 ## Environment variables
@@ -175,13 +183,19 @@ See `docker-compose.yml` for Airflow. Commodity / MCP:
 - `ALPHA_VANTAGE_INTERVAL` — `monthly` (default) or `daily`
 - `ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS` — default `15`
 - `SIGNAL_WEIGHT_*` / `SIGNAL_BUY_THRESHOLD` / `SIGNAL_SELL_THRESHOLD`
+- `BRONZE_PROFILE_FAIL_ON_ERROR` — default `true` (fail the DAG on empty/unparseable bronze)
+- `BRONZE_PROFILE_WARN_MIN_POINTS` — default `5` (spot quotes warn, they do not fail)
+
+## Infrastructure as code
+
+Optional AWS sample at repo root [`../terraform/`](../terraform/README.md) (sibling of `default/`): versioned S3 for Bronze objects and an optional RDS Postgres warehouse. Local Compose Postgres is enough to run this sample. Do not commit credentials; CI does not apply Terraform.
 
 ## Tests
 
 From `default/`:
 
 ```bash
-PYTHONPATH=dags python -m unittest discover -s tests -v
+PYTHONPATH=dags:plugins python -m unittest discover -s tests -v
 ```
 
 Mocked MCP session + temp SQLite warehouse. No live key required.

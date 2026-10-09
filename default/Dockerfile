@@ -25,6 +25,7 @@ COPY --from=base /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.
 COPY --from=base /usr/local/bin /usr/local/bin
 
 COPY dags ./dags
+COPY plugins ./plugins
 COPY entrypoint.sh .
 
 RUN chmod +x entrypoint.sh
