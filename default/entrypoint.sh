@@ -28,60 +28,32 @@ PY
 # Password is never printed. Production should use an Airflow secrets backend.
 export PYTHONPATH="${PYTHONPATH:-}:/app/dags"
 python - <<'PY'
-import json
-import os
-import subprocess
-import tempfile
-from pathlib import Path
-
-from alpha_vantage_mcp import ALPHA_VANTAGE_CONN_ID, connection_import_document, redact_secrets
+from alpha_vantage_mcp import (
+    ALPHA_VANTAGE_CONN_ID,
+    _env_api_key,
+    redact_secrets,
+    upsert_alpha_vantage_connection,
+)
 from medallion import init_warehouse
 
-doc = connection_import_document()
-password = doc[ALPHA_VANTAGE_CONN_ID].get("password") or ""
-lock_dir = Path(os.environ.get("MEDALLION_DATA_DIR", "/app/data/medallion")).parent
-lock_dir.mkdir(parents=True, exist_ok=True)
-lock_path = lock_dir / ".alpha_vantage_conn.lock"
-
-
-def _seed() -> None:
-    fd, path = tempfile.mkstemp(prefix="alpha_vantage_conn_", suffix=".json")
-    try:
-        with os.fdopen(fd, "w") as handle:
-            json.dump(doc, handle)
-        subprocess.check_call(
-            ["airflow", "connections", "import", "--overwrite", path],
-            stdout=subprocess.DEVNULL,
+password = _env_api_key()
+try:
+    result = upsert_alpha_vantage_connection()
+    if result == "skipped-empty-password":
+        print(
+            f"Skipping {ALPHA_VANTAGE_CONN_ID} seed: ALPHA_VANTAGE_API_KEY is empty. "
+            "Set it in .env for local compose."
         )
-    finally:
-        try:
-            os.remove(path)
-        except OSError:
-            pass
-
-
-if not password:
-    print(
-        f"Skipping {ALPHA_VANTAGE_CONN_ID} seed: ALPHA_VANTAGE_API_KEY is empty. "
-        "Set it in .env for local compose."
-    )
-else:
-    import fcntl
-
-    with lock_path.open("w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        try:
-            _seed()
-            print(
-                f"Seeded Airflow connection {ALPHA_VANTAGE_CONN_ID} "
-                "(conn-password from env; extra transport/mcp_url; secret not logged)"
-            )
-        except Exception as exc:
-            print(redact_secrets(f"Failed to seed {ALPHA_VANTAGE_CONN_ID}: {exc}", password))
-            raise
-
-init_warehouse()
-print("Medallion warehouse ready (bronze/silver/gold)")
+    else:
+        print(
+            f"Seeded Airflow connection {ALPHA_VANTAGE_CONN_ID} "
+            "(conn-password from env; extra transport/mcp_url; secret not logged)"
+        )
+    init_warehouse()
+    print("Medallion warehouse ready (bronze/silver/gold)")
+except Exception as exc:
+    print(redact_secrets(f"Failed to seed {ALPHA_VANTAGE_CONN_ID}: {exc}", password))
+    raise
 PY
 
 # Run whatever service command was passed by docker-compose

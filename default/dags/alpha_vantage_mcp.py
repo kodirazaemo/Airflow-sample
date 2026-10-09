@@ -205,7 +205,7 @@ def compose_connection_extra() -> dict[str, str]:
 
 
 def connection_import_document() -> dict:
-    """JSON document for `airflow connections import --overwrite`."""
+    """JSON document for seeding Connection alpha_vantage_default."""
     extra = compose_connection_extra()
     return {
         ALPHA_VANTAGE_CONN_ID: {
@@ -218,6 +218,54 @@ def connection_import_document() -> dict:
             'extra': json.dumps(extra, sort_keys=True),
         }
     }
+
+
+def upsert_alpha_vantage_connection() -> str:
+    """
+    Add or replace Connection alpha_vantage_default from the environment.
+
+    Deletes the existing row with SQL (so a leftover password encrypted with a
+    different Fernet key cannot break decrypt-on-load), then inserts a new row.
+    Uses a Postgres advisory lock so compose services do not race.
+    """
+    from airflow.models.connection import Connection
+    from airflow.settings import Session
+    from sqlalchemy import text
+
+    doc = connection_import_document()
+    spec = doc[ALPHA_VANTAGE_CONN_ID]
+    password = spec.get('password') or ''
+    if not password:
+        return 'skipped-empty-password'
+
+    session = Session()
+    try:
+        session.execute(text('SELECT pg_advisory_lock(872511)'))
+        session.execute(
+            text('DELETE FROM connection WHERE conn_id = :cid'),
+            {'cid': ALPHA_VANTAGE_CONN_ID},
+        )
+        session.add(
+            Connection(
+                conn_id=ALPHA_VANTAGE_CONN_ID,
+                conn_type=spec['conn_type'],
+                password=password,
+                extra=spec['extra'],
+                description=spec['description'],
+            )
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        try:
+            session.execute(text('SELECT pg_advisory_unlock(872511)'))
+            session.commit()
+        except Exception:
+            session.rollback()
+        session.close()
+    return 'upserted'
 
 
 def stdio_server_spec(api_key: str | None = None) -> tuple[str, list[str]]:
