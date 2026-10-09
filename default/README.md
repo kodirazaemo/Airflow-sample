@@ -15,9 +15,14 @@ cp .env.example .env
 # Edit .env and set ALPHA_VANTAGE_API_KEY to your key (do not commit .env)
 ```
 
-`docker compose` reads `.env` automatically and passes the key into Airflow services.
+`docker compose` reads `.env` automatically. On container boot `entrypoint.sh` upserts Airflow Connection `alpha_vantage_default` (`airflow connections import --overwrite`) with:
 
-The sample authenticates to the [Alpha Vantage MCP server](https://mcp.alphavantage.co/#connection-examples) using that key. Interactive OAuth is for desktop MCP clients; Airflow uses the documented API-key connection patterns:
+- **conn-password** — `ALPHA_VANTAGE_API_KEY` (local seed only)
+- **conn extra** — `transport`, `mcp_url`, `mcp_sse_url` (compose forwarder defaults: `https://mcp.alphavantage.co:18080/mcp` and `/sse`)
+
+Tasks resolve the key and MCP extras with `BaseHook.get_connection('alpha_vantage_default')`. `.env` is not the runtime source of truth; it only seeds the connection for local compose. Production should store the password in an Airflow secrets backend instead of an env file.
+
+The sample authenticates to the [Alpha Vantage MCP server](https://mcp.alphavantage.co/#connection-examples) using that connection. Interactive OAuth is for desktop MCP clients; Airflow uses the documented API-key connection patterns:
 
 | `ALPHA_VANTAGE_TRANSPORT` | What it does |
 |---------------------------|--------------|
@@ -47,7 +52,7 @@ Access Airflow at `http://localhost:8080`
 3. Task `list_mcp_tools` runs MCP `tools/list`.
 4. Task `read_wti_monthly` runs MCP `tools/call` for `WTI` with `interval=monthly`.
 
-The daily **`commodity_trading_dag`** uses the same MCP client for gold, WTI, wheat, copper, and natural gas.
+The daily **`commodity_trading_dag`** uses the same MCP client for gold, WTI, wheat, copper, and natural gas, writing **bronze / silver / gold** tables in Postgres (plus JSON snapshots under `data/medallion/`).
 
 ### Stop
 ```bash
@@ -64,24 +69,28 @@ docker compose down
 ├── .env.example            # Alpha Vantage / MCP / signal config template
 ├── dags/
 │   ├── sample_dag.py                 # Example DAG with Python tasks
-│   ├── alpha_vantage_mcp.py          # MCP client (http / sse / stdio)
+│   ├── alpha_vantage_mcp.py          # MCP client + Connection helpers
+│   ├── medallion.py                  # Bronze/silver/gold warehouse helpers
 │   ├── alpha_vantage_mcp_read_dag.py # Manual tools/list + WTI tools/call
-│   └── commodity_dag.py              # Commodity trading sample pipeline
+│   └── commodity_dag.py              # Medallion commodity pipeline
 ├── tests/                  # Unit tests with a mocked MCP session
 └── .dockerignore
 ```
 
 ## Commodity Trading DAG (`commodity_dag.py`)
 
-Daily pipeline (`commodity_trading_dag`) that pulls live commodity data from **Alpha Vantage MCP** and scores trades with a **weighted multi-indicator model**:
+Daily pipeline (`commodity_trading_dag`) that pulls live commodity data from **Alpha Vantage MCP**, lands it in a **medallion** warehouse, and scores trades with a **weighted multi-indicator model**:
 
 1. **start_trading_session** — opens the session
-2. **fetch_market_prices** — MCP `tools/list` then `tools/call` for gold, WTI crude, wheat, copper, and natural gas (stores price history)
-3. **validate_market_data** — checks for missing/invalid quotes
-4. **compute_trading_signals** — runs separate signal functions, then combines them by weight
-5. **generate_trade_orders** — builds notional orders for actionable signals
-6. **publish_daily_report** — prints an end-of-day summary with per-indicator detail
-7. **close_trading_session** — closes the session
+2. **extract_bronze** — MCP `tools/list` / `tools/call` (or REST); writes an **immutable** raw payload per symbol (Postgres `bronze.mcp_snapshots` and `data/medallion/bronze/<ds>/<symbol>.json`). If that snapshot already exists, the task **does not re-fetch** MCP — retries after a later failure reuse bronze.
+3. **transform_silver** — reads bronze, validates schema/nulls/non-positive prices, writes `silver.commodity_quotes` and `silver.commodity_price_series`
+4. **compute_gold** — **SQL** aggregations into `gold.commodity_metrics` (latest/min/max/avg, observation count, period return) plus weighted Python signals
+5. **score_obv_data_quality** — compares template synthetic-volume `compute_obv_signal` to a linear historical price trend line (agreement + correlation → `gold.obv_quality`)
+6. **generate_trade_orders** — builds notional orders for actionable signals
+7. **publish_daily_report** — end-of-day summary including gold metrics and OBV data-quality scores
+8. **close_trading_session** — closes the session
+
+A BI tool can query `gold.commodity_metrics` and `gold.obv_quality` in the same Postgres instance compose already runs for Airflow metadata. Unit tests use SQLite + local JSON when that database is not configured.
 
 Alpha Vantage functions (`WTI`, `COPPER`, `GOLD_SILVER_HISTORY`, …) are exposed as MCP tools; the client discovers them with `tools/list` and reads with `tools/call`.
 
@@ -95,7 +104,7 @@ Alpha Vantage functions (`WTI`, `COPPER`, `GOLD_SILVER_HISTORY`, …) are expose
 | `compute_macd_signal` | MACD(12,26,9) histogram | 0.25 |
 | `compute_obv_signal` | OBV trend vs SMA (synthetic volume*) | 0.10 |
 
-\*Commodity endpoints do not provide volume, so OBV uses `|price change|` as a volume proxy.
+\*Commodity endpoints do not provide volume, so OBV uses `|price change|` as a volume proxy. Task `score_obv_data_quality` scores that proxy against the actual price trend line.
 
 Each indicator returns `BUY (+1)`, `SELL (-1)`, or `HOLD (0)`.  
 `combine_weighted_signals()` computes a weighted score:
@@ -139,8 +148,9 @@ If a manual run stalls on the first task (`queued` / retry) and you never see Al
    ```bash
    docker compose logs airflow-scheduler --tail=200
    ```
-4. After a successful `fetch_market_prices` run you should see lines like:
-   `Fetched GOLD via alpha_vantage_mcp ...`
+4. After a successful `extract_bronze` run you should see lines like:
+   `Bronze snapshot GOLD via alpha_vantage_mcp ...`
+   On retry, reused bronze logs `Reusing bronze snapshot for GOLD ... (skip MCP)`.
 
 ## Adding Custom DAGs
 1. Create a new Python file in `dags/`
@@ -155,7 +165,7 @@ from airflow.providers.standard.operators.python import PythonOperator
 from airflow.providers.standard.operators.bash import BashOperator
 ```
 
-MCP reads from Python tasks:
+MCP reads from Python tasks (client loads Connection `alpha_vantage_default`):
 
 ```python
 from alpha_vantage_mcp import AlphaVantageMcpClient
@@ -169,10 +179,11 @@ with AlphaVantageMcpClient() as client:
 See `docker-compose.yml` for Airflow config (database, executor, auth, etc.).
 
 Commodity / MCP:
-- `ALPHA_VANTAGE_API_KEY` (or `ALPHA_VANTAGE_KEY`) — required for live prices (see `.env.example`)
-- `ALPHA_VANTAGE_TRANSPORT` — `http` (default), `sse`, `stdio`, or `rest`
-- `ALPHA_VANTAGE_MCP_URL` — default `https://mcp.alphavantage.co:18080/mcp` (host-network forwarder)
-- `ALPHA_VANTAGE_MCP_SSE_URL` — default `https://mcp.alphavantage.co:18080/sse`
+- `ALPHA_VANTAGE_API_KEY` (or `ALPHA_VANTAGE_KEY`) — seeds Connection `alpha_vantage_default` on boot (see `.env.example`). Do not commit `.env`.
+- `ALPHA_VANTAGE_TRANSPORT` — `http` (default), `sse`, `stdio`, or `rest` (also stored on the connection extra)
+- `ALPHA_VANTAGE_MCP_URL` — default `https://mcp.alphavantage.co:18080/mcp` (host-network forwarder; connection extra `mcp_url`)
+- `ALPHA_VANTAGE_MCP_SSE_URL` — default `https://mcp.alphavantage.co:18080/sse` (connection extra `mcp_sse_url`)
+- `MEDALLION_DATA_DIR` — local bronze JSON directory (default `/app/data/medallion`)
 - `ALPHA_VANTAGE_MCP_STDIO_COMMAND` / `ALPHA_VANTAGE_MCP_STDIO_ARGS` — local stdio server (`uvx` + `marketdata-mcp-server`)
 - `ALPHA_VANTAGE_INTERVAL` — `monthly` (default) or `daily`
 - `ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS` — delay between API calls (default `15`)
@@ -186,10 +197,10 @@ From `default/`:
 PYTHONPATH=dags python -m unittest discover -s tests -v
 ```
 
-These tests mock the MCP session. They do not need a paid (or any live) Alpha Vantage key.
+These tests mock the MCP session and use a temp SQLite medallion warehouse. They do not need a paid (or any live) Alpha Vantage key.
 
 ## Notes
 - Uses **LocalExecutor** for single-machine setup
-- PostgreSQL stores metadata and DAG state
+- PostgreSQL stores Airflow metadata plus bronze/silver/gold schemas (`bronze`, `silver`, `gold`)
 - Auth uses Airflow 3 **Simple Auth Manager** (`admin` / `admin` for local use)
 - For production, consider the official Helm chart, Celery/Kubernetes executors, and a stronger auth manager

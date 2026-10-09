@@ -35,12 +35,14 @@ x-airflow-common: &airflow-common
     ALPHA_VANTAGE_MCP_SSE_URL: ${ALPHA_VANTAGE_MCP_SSE_URL:-https://mcp.alphavantage.co:18080/sse}
     ALPHA_VANTAGE_MCP_STDIO_COMMAND: ${ALPHA_VANTAGE_MCP_STDIO_COMMAND:-uvx}
     ALPHA_VANTAGE_MCP_STDIO_ARGS: ${ALPHA_VANTAGE_MCP_STDIO_ARGS:-marketdata-mcp-server}
+    MEDALLION_DATA_DIR: /app/data/medallion
   extra_hosts:
     - "mcp.alphavantage.co:host-gateway"
     - "host.docker.internal:host-gateway"
   volumes:
     - ./dags:/app/dags
     - ./logs:/app/logs
+    - ./data:/app/data
 
 services:
   # Host-network TLS forwarder so Airflow workers can reach Alpha Vantage MCP

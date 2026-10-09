@@ -10,9 +10,14 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from alpha_vantage_mcp import (
+    ALPHA_VANTAGE_CONN_ID,
     AlphaVantageMcpClient,
+    compose_connection_extra,
+    connection_import_document,
+    get_api_key,
     get_transport,
     list_mcp_tool_names,
+    load_alpha_vantage_settings,
     mcp_http_url,
     mcp_sse_url,
     parse_mcp_tool_result,
@@ -93,6 +98,68 @@ class TransportConfigTests(unittest.TestCase):
             redact_secrets(leaked, 'secret-test-key'),
             'Failed https://mcp.alphavantage.co/mcp?apikey=*** timeout',
         )
+
+    def test_env_fallback_when_no_airflow_connection(self):
+        with patch.dict(
+            os.environ,
+            {
+                'ALPHA_VANTAGE_API_KEY': 'secret-test-key',
+                'ALPHA_VANTAGE_TRANSPORT': 'sse',
+                'ALPHA_VANTAGE_MCP_URL': 'https://mcp.alphavantage.co:18080/mcp',
+            },
+            clear=True,
+        ):
+            with patch('alpha_vantage_mcp._connection_or_none', return_value=None):
+                self.assertEqual(get_api_key(), 'secret-test-key')
+                self.assertEqual(get_transport(), 'sse')
+                self.assertIn(':18080/mcp', mcp_http_url())
+
+    def test_connection_password_and_extra_override_env(self):
+        conn = SimpleNamespace(
+            password='conn-secret-key',
+            extra_dejson={
+                'transport': 'http',
+                'mcp_url': 'https://mcp.alphavantage.co:18080/mcp',
+                'mcp_sse_url': 'https://mcp.alphavantage.co:18080/sse',
+            },
+            extra=None,
+        )
+        with patch.dict(
+            os.environ,
+            {
+                'ALPHA_VANTAGE_API_KEY': 'env-should-not-win',
+                'ALPHA_VANTAGE_TRANSPORT': 'rest',
+                'ALPHA_VANTAGE_MCP_URL': 'https://example.invalid/mcp',
+            },
+        ):
+            with patch('alpha_vantage_mcp._connection_or_none', return_value=conn):
+                settings = load_alpha_vantage_settings()
+        self.assertEqual(settings['api_key'], 'conn-secret-key')
+        self.assertEqual(settings['transport'], 'http')
+        self.assertEqual(settings['mcp_url'], 'https://mcp.alphavantage.co:18080/mcp')
+        self.assertEqual(settings['mcp_sse_url'], 'https://mcp.alphavantage.co:18080/sse')
+
+    def test_connection_seed_document_uses_compose_mcp_urls(self):
+        with patch.dict(
+            os.environ,
+            {
+                'ALPHA_VANTAGE_API_KEY': 'secret-test-key',
+                'ALPHA_VANTAGE_TRANSPORT': 'http',
+                'ALPHA_VANTAGE_MCP_URL': 'https://mcp.alphavantage.co:18080/mcp',
+                'ALPHA_VANTAGE_MCP_SSE_URL': 'https://mcp.alphavantage.co:18080/sse',
+            },
+            clear=True,
+        ):
+            extra = compose_connection_extra()
+            doc = connection_import_document()
+        self.assertEqual(extra['mcp_url'], 'https://mcp.alphavantage.co:18080/mcp')
+        self.assertEqual(extra['mcp_sse_url'], 'https://mcp.alphavantage.co:18080/sse')
+        self.assertIn(ALPHA_VANTAGE_CONN_ID, doc)
+        self.assertEqual(doc[ALPHA_VANTAGE_CONN_ID]['password'], 'secret-test-key')
+        self.assertEqual(doc[ALPHA_VANTAGE_CONN_ID]['conn_type'], 'generic')
+        parsed_extra = json.loads(doc[ALPHA_VANTAGE_CONN_ID]['extra'])
+        self.assertEqual(parsed_extra['transport'], 'http')
+        self.assertEqual(parsed_extra['mcp_url'], extra['mcp_url'])
 
 
 class ParseResultTests(unittest.TestCase):

@@ -6,7 +6,8 @@ Trigger this DAG to:
 2. Discover tools via tools/list
 3. Call WTI (monthly) via tools/call
 
-Configure ALPHA_VANTAGE_API_KEY in .env — never commit a real key.
+Local compose seeds Connection ``alpha_vantage_default`` from .env
+(never commit a real key). Tasks read it via BaseHook.get_connection.
 Connection patterns: https://mcp.alphavantage.co/#connection-examples
 """
 

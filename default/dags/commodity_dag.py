@@ -1,17 +1,14 @@
 """
-Commodity trading sample DAG.
+Commodity trading sample DAG (medallion layout).
 
 Daily pipeline that:
-1. Fetches commodity prices from the Alpha Vantage MCP server
-   (HTTP / SSE / stdio; see https://mcp.alphavantage.co/#connection-examples)
-2. Validates data quality
-3. Computes trading signals (momentum, moving averages, RSI, MACD, OBV)
-4. Combines signals with a weighted decision model
-5. Generates trade recommendations
-6. Publishes a daily summary report
+1. Bronze — extracts raw Alpha Vantage MCP payloads to immutable snapshots
+2. Silver — validates bronze (schema / nulls) and writes cleaned tables
+3. Gold — SQL business metrics a BI tool can read, plus weighted signals
+4. Compares synthetic-volume OBV against historical price trend lines
+5. Generates trade recommendations and a daily report
 
-Requires env var ALPHA_VANTAGE_API_KEY (or ALPHA_VANTAGE_KEY)
-(https://www.alphavantage.co/support/#api-key).
+Auth: Airflow Connection ``alpha_vantage_default`` (seeded from .env on boot).
 Set ALPHA_VANTAGE_TRANSPORT=rest to use the legacy www.alphavantage.co REST API.
 """
 
@@ -29,6 +26,18 @@ from airflow.providers.standard.operators.python import PythonOperator
 from airflow.sdk import DAG
 
 from alpha_vantage_mcp import AlphaVantageMcpClient, get_api_key, get_transport
+from medallion import (
+    bronze_exists,
+    compute_gold_metrics_sql,
+    init_warehouse,
+    load_bronze_snapshot,
+    load_obv_quality,
+    load_silver_quotes,
+    load_silver_series,
+    replace_silver_symbol,
+    upsert_obv_quality,
+    write_bronze_snapshot,
+)
 
 default_args = {
     'owner': 'trading',
@@ -291,6 +300,44 @@ def fetch_commodity_quote(
     )
 
 
+def fetch_raw_commodity_payload(
+    symbol: str,
+    meta: dict,
+    client: AlphaVantageMcpClient | None = None,
+) -> dict:
+    """Fetch the raw MCP/REST JSON for bronze. Does not parse prices."""
+    attempts = [(meta['function'], meta['params'])]
+    if meta.get('fallback_params'):
+        attempts.append((meta['function'], meta['fallback_params']))
+    if meta.get('spot_fallback'):
+        spot = meta['spot_fallback']
+        attempts.append((spot['function'], spot['params']))
+
+    errors = []
+    pause = _request_pause_seconds()
+    for index, (function, params) in enumerate(attempts):
+        try:
+            payload = _alpha_vantage_get(function, params, client=client)
+            if not isinstance(payload, dict):
+                raise ValueError(f'Unexpected payload type for {symbol}: {type(payload)}')
+            return {
+                'symbol': symbol,
+                'function': function,
+                'params': params,
+                'payload': payload,
+                'source': _price_source(),
+            }
+        except Exception as exc:  # noqa: BLE001 - collect and try fallback
+            errors.append(str(exc))
+            if index < len(attempts) - 1 and pause > 0:
+                time.sleep(pause)
+
+    raise RuntimeError(
+        f'Failed to fetch {symbol} from Alpha Vantage after {len(attempts)} attempt(s): '
+        + ' | '.join(errors)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Technical indicator helpers (pure functions; prices are oldest→newest)
 # ---------------------------------------------------------------------------
@@ -542,6 +589,110 @@ def compute_obv_signal(prices: list[float], trend_window: int = 5) -> dict:
     return _signal_result(0, value, f'OBV flat vs SMA{trend_window}')
 
 
+def _obv_series(prices: list[float]) -> list[float]:
+    obv = [0.0]
+    for i in range(1, len(prices)):
+        volume = abs(prices[i] - prices[i - 1])
+        if prices[i] > prices[i - 1]:
+            obv.append(obv[-1] + volume)
+        elif prices[i] < prices[i - 1]:
+            obv.append(obv[-1] - volume)
+        else:
+            obv.append(obv[-1])
+    return obv
+
+
+def _linear_trend_slope(values: list[float]) -> float:
+    n = len(values)
+    if n < 2:
+        return 0.0
+    xs = list(range(n))
+    x_mean = sum(xs) / n
+    y_mean = sum(values) / n
+    denom = sum((x - x_mean) ** 2 for x in xs)
+    if denom == 0:
+        return 0.0
+    return sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, values)) / denom
+
+
+def _pearson(xs: list[float], ys: list[float]) -> float | None:
+    n = min(len(xs), len(ys))
+    if n < 3:
+        return None
+    xs = xs[-n:]
+    ys = ys[-n:]
+    x_mean = sum(xs) / n
+    y_mean = sum(ys) / n
+    cov = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, ys))
+    x_var = sum((x - x_mean) ** 2 for x in xs)
+    y_var = sum((y - y_mean) ** 2 for y in ys)
+    denom = (x_var * y_var) ** 0.5
+    if denom == 0:
+        return None
+    return cov / denom
+
+
+def compute_obv_data_quality(prices: list[float], trend_window: int = 5) -> dict:
+    """
+    Compare synthetic-volume OBV (compute_obv_signal) to the actual price trend.
+
+    Commodity MCP series have no volume, so OBV uses |price change| as a proxy.
+    This score measures whether that proxy agrees with a linear trend line on
+    the same history (plus Pearson correlation of OBV vs price).
+    """
+    obv_signal = compute_obv_signal(prices, trend_window=trend_window)
+    if len(prices) < trend_window + 1:
+        return {
+            'quality_score': 0.0,
+            'obv_action': obv_signal['action'],
+            'price_trend_action': 'HOLD',
+            'obv_price_correlation': None,
+            'agreement': 0.0,
+            'price_trend_slope': None,
+            'detail': obv_signal['detail'],
+        }
+
+    window = prices[-max(trend_window, 5) :]
+    slope = _linear_trend_slope(window)
+    last = window[-1] or 1.0
+    rel_slope = slope / last
+    # Relative slope threshold: ~0.1% per step in the fitted window.
+    if rel_slope > 0.001:
+        trend_score = 1
+        trend_action = 'BUY'
+    elif rel_slope < -0.001:
+        trend_score = -1
+        trend_action = 'SELL'
+    else:
+        trend_score = 0
+        trend_action = 'HOLD'
+
+    obv_score = int(obv_signal.get('score') or 0)
+    if obv_score == trend_score:
+        agreement = 1.0 if obv_score != 0 else 0.8
+    elif obv_score == 0 or trend_score == 0:
+        agreement = 0.5
+    else:
+        agreement = 0.0
+
+    corr = _pearson(prices, _obv_series(prices))
+    corr_score = 0.5 if corr is None else max(0.0, min(1.0, (corr + 1.0) / 2.0))
+    quality = round(0.7 * agreement + 0.3 * corr_score, 4)
+    detail = (
+        f"OBV {obv_signal['action']} vs price-trend {trend_action} "
+        f'(agreement={agreement:.2f}, corr={corr if corr is not None else "n/a"})'
+    )
+    return {
+        'quality_score': quality,
+        'obv_action': obv_signal['action'],
+        'price_trend_action': trend_action,
+        'obv_price_correlation': None if corr is None else round(corr, 4),
+        'agreement': agreement,
+        'price_trend_slope': round(rel_slope, 6),
+        'detail': detail,
+    }
+
+
 def get_signal_weights() -> dict[str, float]:
     """Load signal weights (env overrides supported)."""
     weights = dict(DEFAULT_SIGNAL_WEIGHTS)
@@ -599,110 +750,159 @@ def combine_weighted_signals(component_signals: dict[str, dict], weights: dict[s
 
 
 # ---------------------------------------------------------------------------
-# Airflow tasks
+# Airflow tasks (bronze → silver → gold)
 # ---------------------------------------------------------------------------
 
-def fetch_market_prices(**context):
-    """Pull latest commodity prices (and history) via Alpha Vantage MCP (or REST)."""
+def extract_bronze(**context):
+    """
+    Bronze extract: persist raw MCP/REST payloads.
+
+    If a snapshot already exists for this trading date + symbol, skip the
+    live call so a later task retry does not re-hit Alpha Vantage.
+    """
+    init_warehouse()
+    ds = context['ds']
     commodities = get_commodities()
-    prices = {}
-    series_by_symbol = {}
     symbols = list(commodities.items())
     pause = _request_pause_seconds()
     transport = get_transport()
-    source = _price_source()
+    reused = []
+    fetched = []
+
+    pending = [(symbol, meta) for symbol, meta in symbols if not bronze_exists(ds, symbol)]
+    already = [symbol for symbol, _meta in symbols if bronze_exists(ds, symbol)]
+    reused.extend(already)
+    for symbol in already:
+        print(f'Reusing bronze snapshot for {symbol} on {ds} (skip MCP)')
 
     def _run(client: AlphaVantageMcpClient | None) -> None:
-        if client is not None:
+        if client is not None and pending:
             tools = client.list_tools()
             print(
                 f'Alpha Vantage MCP ({transport}) connected; '
                 f'{len(tools)} tools available'
             )
-        for index, (symbol, meta) in enumerate(symbols):
-            quote = fetch_commodity_quote(symbol, meta, client=client)
-            prices[symbol] = {
-                'price': quote['price'],
-                'unit': quote['unit'],
-                'change_pct': quote['change_pct'],
-                'as_of': quote['as_of'],
-                'prior_as_of': quote.get('prior_as_of'),
-                'interval': quote.get('interval'),
-                'source': source,
-                'history_points': len(quote.get('series') or []),
-            }
-            series_by_symbol[symbol] = quote.get('series') or []
-            print(
-                f"Fetched {symbol} via {source} ({quote.get('interval')}): "
-                f"{quote['price']} {quote['unit']} ({quote['change_pct']:+.3f}%) "
-                f"as of {quote['as_of']} [{prices[symbol]['history_points']} pts]"
+        for index, (symbol, meta) in enumerate(pending):
+            raw = fetch_raw_commodity_payload(symbol, meta, client=client)
+            write_bronze_snapshot(
+                ds,
+                symbol,
+                function=raw['function'],
+                params=raw['params'],
+                payload=raw['payload'],
+                source=raw['source'],
             )
-            if index < len(symbols) - 1 and pause > 0:
+            fetched.append(symbol)
+            print(f"Bronze snapshot {symbol} via {raw['source']} ({raw['function']})")
+            if index < len(pending) - 1 and pause > 0:
                 time.sleep(pause)
 
-    if transport == 'rest':
+    if not pending:
+        pass
+    elif transport == 'rest':
         _run(None)
     else:
         with AlphaVantageMcpClient() as client:
             _run(client)
 
-    context['ti'].xcom_push(key='market_prices', value=prices)
-    context['ti'].xcom_push(key='price_series', value=series_by_symbol)
-    return prices
+    summary = {
+        'trading_date': ds,
+        'fetched': fetched,
+        'reused': reused,
+        'symbols': [symbol for symbol, _meta in symbols],
+    }
+    context['ti'].xcom_push(key='bronze_extract', value=summary)
+    return summary
 
 
-def validate_market_data(**context):
-    """Ensure prices are present and within plausible bounds."""
+def transform_silver(**context):
+    """Silver: validate bronze payloads (schema / nulls) and write cleaned tables."""
+    init_warehouse()
+    ds = context['ds']
     commodities = get_commodities()
-    prices = context['ti'].xcom_pull(task_ids='fetch_market_prices', key='market_prices')
-    series_by_symbol = context['ti'].xcom_pull(task_ids='fetch_market_prices', key='price_series') or {}
-    if not prices:
-        raise ValueError('No market prices received from upstream task')
-
     errors = []
-    for symbol, quote in prices.items():
-        price = quote['price']
-        if price is None or price <= 0:
-            errors.append(f'{symbol}: non-positive price ({price})')
-        # Guardrail: reject moves larger than 50% as likely bad ticks
-        # (monthly series can move more than daily)
+    quotes = {}
+
+    for symbol in commodities:
+        try:
+            bronze = load_bronze_snapshot(ds, symbol)
+        except FileNotFoundError:
+            errors.append(f'{symbol}: missing bronze snapshot')
+            continue
+        payload = bronze.get('payload')
+        if not isinstance(payload, dict):
+            errors.append(f'{symbol}: bronze payload is not an object')
+            continue
+        try:
+            series_newest_first, unit = _parse_price_series(payload)
+        except Exception as exc:  # noqa: BLE001 - collect per-symbol errors
+            errors.append(f'{symbol}: {exc}')
+            continue
+
+        chrono = _chrono_prices(series_newest_first)
+        quote = _latest_quote(series_newest_first, unit)
+        quote['symbol'] = symbol
+        quote['function'] = bronze.get('function')
+        quote['interval'] = (bronze.get('params') or {}).get('interval', 'spot')
+        quote['source'] = bronze.get('source') or _price_source()
+
+        if quote['price'] is None or quote['price'] <= 0:
+            errors.append(f'{symbol}: non-positive price ({quote["price"]})')
+            continue
         if abs(quote['change_pct']) > 50:
             errors.append(f'{symbol}: extreme move {quote["change_pct"]}%')
+            continue
+        if any(point['price'] is None or point['price'] <= 0 for point in chrono):
+            errors.append(f'{symbol}: null/non-positive observation in series')
+            continue
 
-    missing = set(commodities) - set(prices)
+        replace_silver_symbol(ds, symbol, quote=quote, series=chrono, unit=unit)
+        quotes[symbol] = {
+            'price': quote['price'],
+            'unit': unit,
+            'change_pct': quote['change_pct'],
+            'as_of': quote['as_of'],
+            'prior_as_of': quote.get('prior_as_of'),
+            'interval': quote.get('interval'),
+            'source': quote['source'],
+            'history_points': len(chrono),
+        }
+        print(
+            f"Silver {symbol}: {quote['price']} {unit} "
+            f"({quote['change_pct']:+.3f}%) [{len(chrono)} pts]"
+        )
+
+    missing = set(commodities) - set(quotes)
     if missing:
         errors.append(f'Missing symbols: {sorted(missing)}')
-
     if errors:
-        raise ValueError('Market data validation failed: ' + '; '.join(errors))
+        raise ValueError('Silver validation failed: ' + '; '.join(errors))
 
-    print(f'Validated {len(prices)} Alpha Vantage commodity quotes successfully')
-    context['ti'].xcom_push(key='validated_prices', value=prices)
-    context['ti'].xcom_push(key='price_series', value=series_by_symbol)
-    return {'validated_count': len(prices)}
+    context['ti'].xcom_push(key='validated_prices', value=quotes)
+    return {'validated_count': len(quotes)}
 
 
-def compute_trading_signals(**context):
+def compute_gold(**context):
     """
-    Compute per-indicator signals and combine them with a weighted model.
+    Gold: SQL aggregations from silver, plus weighted trading signals.
 
-    Indicators (each in its own function):
-    - momentum
-    - moving averages
-    - RSI
-    - MACD
-    - OBV (synthetic volume from abs price change)
+    Metrics (min/max/avg/period return) are computed in SQL so a BI tool can
+    read gold.commodity_metrics. Indicator scores remain Python functions.
     """
-    prices = context['ti'].xcom_pull(task_ids='validate_market_data', key='validated_prices')
-    series_by_symbol = context['ti'].xcom_pull(task_ids='validate_market_data', key='price_series') or {}
+    ds = context['ds']
+    quotes = load_silver_quotes(ds)
+    if not quotes:
+        raise ValueError(f'No silver quotes for {ds}')
+    metrics = compute_gold_metrics_sql(ds)
     weights = get_signal_weights()
     signals = {}
 
+    print('Gold SQL metrics:', {row['symbol']: round(row['avg_price'] or 0, 4) for row in metrics})
     print('Signal weights:', {k: round(v, 4) for k, v in weights.items()})
     print(f'Thresholds: BUY>={BUY_SCORE_THRESHOLD}, SELL<={SELL_SCORE_THRESHOLD}')
 
-    for symbol, quote in prices.items():
-        series = series_by_symbol.get(symbol) or []
+    for symbol, quote in quotes.items():
+        series = load_silver_series(ds, symbol)
         close_prices = [point['price'] for point in series]
         if not close_prices:
             close_prices = [quote['price']]
@@ -715,7 +915,6 @@ def compute_trading_signals(**context):
             'obv': compute_obv_signal(close_prices),
         }
         decision = combine_weighted_signals(components, weights)
-
         signals[symbol] = {
             'action': decision['action'],
             'price': quote['price'],
@@ -733,14 +932,31 @@ def compute_trading_signals(**context):
         for name, result in components.items():
             print(f"  - {name}: {result['action']} | {result['detail']}")
 
+    context['ti'].xcom_push(key='gold_metrics', value=metrics)
     context['ti'].xcom_push(key='trading_signals', value=signals)
-    return signals
+    return {'metrics': metrics, 'signals': signals}
+
+
+def score_obv_data_quality(**context):
+    """Compare synthetic OBV against historical price trend lines; write gold."""
+    ds = context['ds']
+    quotes = load_silver_quotes(ds)
+    scores = {}
+    for symbol in quotes:
+        series = load_silver_series(ds, symbol)
+        prices = [point['price'] for point in series]
+        quality = compute_obv_data_quality(prices)
+        upsert_obv_quality(ds, symbol, quality)
+        scores[symbol] = quality
+        print(f"OBV quality {symbol}: {quality['quality_score']} | {quality['detail']}")
+    context['ti'].xcom_push(key='obv_quality', value=scores)
+    return scores
 
 
 def generate_trade_orders(**context):
     """Turn BUY/SELL signals into notional trade orders."""
     commodities = get_commodities()
-    signals = context['ti'].xcom_pull(task_ids='compute_trading_signals', key='trading_signals')
+    signals = context['ti'].xcom_pull(task_ids='compute_gold', key='trading_signals')
 
     orders = []
     for symbol, signal in signals.items():
@@ -773,9 +989,12 @@ def generate_trade_orders(**context):
 
 def publish_daily_report(**context):
     """Build a short end-of-day trading summary."""
-    prices = context['ti'].xcom_pull(task_ids='validate_market_data', key='validated_prices')
-    signals = context['ti'].xcom_pull(task_ids='compute_trading_signals', key='trading_signals')
+    ds = context['ds']
+    prices = load_silver_quotes(ds)
+    signals = context['ti'].xcom_pull(task_ids='compute_gold', key='trading_signals')
     orders = context['ti'].xcom_pull(task_ids='generate_trade_orders', key='trade_orders') or []
+    quality = load_obv_quality(ds)
+    metrics = context['ti'].xcom_pull(task_ids='compute_gold', key='gold_metrics') or []
 
     buys = sum(1 for s in signals.values() if s['action'] == 'BUY')
     sells = sum(1 for s in signals.values() if s['action'] == 'SELL')
@@ -783,27 +1002,32 @@ def publish_daily_report(**context):
     total_notional = sum(o['notional_usd'] for o in orders)
 
     report = {
-        'trading_date': context['ds'],
+        'trading_date': ds,
         'price_source': _price_source(),
         'commodities_tracked': len(prices),
         'signals': {'BUY': buys, 'SELL': sells, 'HOLD': holds},
         'orders_generated': len(orders),
         'total_notional_usd': round(total_notional, 2),
         'model': 'weighted_indicators',
+        'gold_metrics': metrics,
+        'obv_quality': {symbol: row['quality_score'] for symbol, row in quality.items()},
     }
 
     print('=' * 60)
     print(f"Commodity Trading Daily Report — {report['trading_date']}")
     print(f"Price source: {_price_source()}")
+    print('Layers: bronze MCP snapshot → silver quotes → gold SQL metrics')
     print('Decision model: weighted momentum + MA + RSI + MACD + OBV')
     print('=' * 60)
     print(f"Tracked: {report['commodities_tracked']} commodities")
     for symbol, quote in prices.items():
         signal = signals[symbol]
+        q = quality.get(symbol) or {}
         print(
             f"  {symbol:<12} {quote['price']:>12} {quote['unit']:<28} "
             f"{quote['change_pct']:+.3f}%  as of {quote['as_of']}  "
-            f"→ {signal['action']} (score={signal['weighted_score']:+.4f})"
+            f"→ {signal['action']} (score={signal['weighted_score']:+.4f}, "
+            f"obv_dq={q.get('quality_score')})"
         )
         for name, component in signal.get('components', {}).items():
             print(f"      {name:<16} {component['action']:<4} {component['detail']}")
@@ -835,11 +1059,14 @@ def close_trading_session(**context):
 with DAG(
     dag_id='commodity_trading_dag',
     default_args=default_args,
-    description='Commodity trading pipeline using Alpha Vantage MCP + weighted technical signals',
+    description=(
+        'Commodity medallion pipeline: bronze MCP snapshots, silver quotes, '
+        'gold SQL metrics, OBV data-quality vs price trend'
+    ),
     start_date=datetime(2024, 1, 1),
     schedule=timedelta(days=1),
     catchup=False,
-    tags=['commodity', 'trading', 'alpha-vantage', 'mcp', 'sample'],
+    tags=['commodity', 'trading', 'alpha-vantage', 'mcp', 'medallion', 'sample'],
 ) as dag:
 
     start = PythonOperator(
@@ -847,19 +1074,24 @@ with DAG(
         python_callable=open_trading_session,
     )
 
-    fetch_prices = PythonOperator(
-        task_id='fetch_market_prices',
-        python_callable=fetch_market_prices,
+    bronze = PythonOperator(
+        task_id='extract_bronze',
+        python_callable=extract_bronze,
     )
 
-    validate_data = PythonOperator(
-        task_id='validate_market_data',
-        python_callable=validate_market_data,
+    silver = PythonOperator(
+        task_id='transform_silver',
+        python_callable=transform_silver,
     )
 
-    compute_signals = PythonOperator(
-        task_id='compute_trading_signals',
-        python_callable=compute_trading_signals,
+    gold = PythonOperator(
+        task_id='compute_gold',
+        python_callable=compute_gold,
+    )
+
+    obv_quality = PythonOperator(
+        task_id='score_obv_data_quality',
+        python_callable=score_obv_data_quality,
     )
 
     generate_orders = PythonOperator(
@@ -877,4 +1109,4 @@ with DAG(
         python_callable=close_trading_session,
     )
 
-    start >> fetch_prices >> validate_data >> compute_signals >> generate_orders >> publish_report >> end
+    start >> bronze >> silver >> gold >> obv_quality >> generate_orders >> publish_report >> end
