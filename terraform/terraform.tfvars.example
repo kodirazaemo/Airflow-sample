@@ -1,0 +1,16 @@
+# Copy to terraform.tfvars locally if you want to override defaults.
+# Do not commit terraform.tfvars or any cloud credentials.
+
+aws_region     = "us-east-1"
+project_name   = "airflow-sample"
+environment    = "dev"
+
+# Leave empty to use a generated unique bucket prefix.
+bronze_bucket_name = ""
+
+# Local Docker Compose already runs Postgres. Keep this false unless you
+# intentionally want a managed warehouse in AWS.
+enable_warehouse_db = false
+# db_instance_class = "db.t3.micro"
+# db_name           = "airflow"
+# db_username       = "airflow"

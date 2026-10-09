@@ -11,7 +11,12 @@ https://mcp.alphavantage.co/#connection-examples :
 - stdio: local server
   uvx marketdata-mcp-server YOUR_API_KEY
 
-The API key is taken from ALPHA_VANTAGE_API_KEY (or ALPHA_VANTAGE_KEY).
+Secrets come from Airflow Connection ``alpha_vantage_default`` (password =
+API key; extra = transport / mcp_url / mcp_sse_url). Local compose seeds
+that connection from ``.env`` on container boot. Unit tests fall back to
+``ALPHA_VANTAGE_API_KEY`` (or ``ALPHA_VANTAGE_KEY``) when no connection
+is configured.
+
 Never log the raw key or URLs that include it.
 """
 
@@ -27,8 +32,12 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 DEFAULT_MCP_HTTP_URL = 'https://mcp.alphavantage.co/mcp'
 DEFAULT_MCP_SSE_URL = 'https://mcp.alphavantage.co/sse'
+# Compose / .env.example forwarder defaults (host-network TCP 18080).
+DEFAULT_COMPOSE_MCP_HTTP_URL = 'https://mcp.alphavantage.co:18080/mcp'
+DEFAULT_COMPOSE_MCP_SSE_URL = 'https://mcp.alphavantage.co:18080/sse'
 DEFAULT_STDIO_COMMAND = 'uvx'
 DEFAULT_STDIO_ARGS = ('marketdata-mcp-server',)
+ALPHA_VANTAGE_CONN_ID = 'alpha_vantage_default'
 
 _TRANSPORT_ALIASES = {
     'http': 'http',
@@ -41,23 +50,113 @@ _TRANSPORT_ALIASES = {
 }
 
 
-def get_api_key() -> str:
-    key = (
+def _env_api_key() -> str:
+    return (
         os.environ.get('ALPHA_VANTAGE_API_KEY', '').strip()
         or os.environ.get('ALPHA_VANTAGE_KEY', '').strip()
     )
+
+
+def _connection_or_none(conn_id: str = ALPHA_VANTAGE_CONN_ID):
+    """Load Airflow Connection via BaseHook; return None when unavailable (unit tests)."""
+    try:
+        from airflow.sdk import BaseHook
+
+        return BaseHook.get_connection(conn_id)
+    except Exception:
+        pass
+    # Task SDK needs supervisor context; fall back to the metadata DB (compose seed).
+    try:
+        from airflow.models.connection import Connection
+        from airflow.settings import Session
+
+        session = Session()
+        try:
+            return session.query(Connection).filter(Connection.conn_id == conn_id).one_or_none()
+        finally:
+            session.close()
+    except Exception:
+        return None
+
+
+def _extra_dict(conn) -> dict:
+    extra = getattr(conn, 'extra_dejson', None)
+    if isinstance(extra, dict):
+        return extra
+    getter = getattr(conn, 'get_extra_dejson', None)
+    if callable(getter):
+        try:
+            decoded = getter()
+            if isinstance(decoded, dict):
+                return decoded
+        except Exception:
+            pass
+    raw = getattr(conn, 'extra', None)
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            decoded = json.loads(raw)
+            if isinstance(decoded, dict):
+                return decoded
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def load_alpha_vantage_settings() -> dict[str, str]:
+    """
+    Resolve API key + MCP extras from Connection ``alpha_vantage_default``.
+
+    Falls back to environment variables so mocked unit tests need no Airflow
+    metadata DB. Never log the returned api_key.
+    """
+    conn = _connection_or_none()
+    extra = _extra_dict(conn) if conn is not None else {}
+    password = ''
+    if conn is not None:
+        password = (getattr(conn, 'password', None) or '').strip()
+    api_key = password or _env_api_key()
+    transport_raw = str(
+        extra.get('transport')
+        or os.environ.get('ALPHA_VANTAGE_TRANSPORT', 'http')
+        or 'http'
+    ).strip().lower()
+    mcp_url = str(
+        extra.get('mcp_url')
+        or extra.get('http_url')
+        or os.environ.get('ALPHA_VANTAGE_MCP_URL', '')
+        or DEFAULT_MCP_HTTP_URL
+    ).strip()
+    mcp_sse_url = str(
+        extra.get('mcp_sse_url')
+        or extra.get('sse_url')
+        or os.environ.get('ALPHA_VANTAGE_MCP_SSE_URL', '')
+        or DEFAULT_MCP_SSE_URL
+    ).strip()
+    return {
+        'api_key': api_key,
+        'transport': transport_raw,
+        'mcp_url': mcp_url or DEFAULT_MCP_HTTP_URL,
+        'mcp_sse_url': mcp_sse_url or DEFAULT_MCP_SSE_URL,
+    }
+
+
+def get_api_key() -> str:
+    key = load_alpha_vantage_settings()['api_key']
     if not key:
         raise ValueError(
+            f'Airflow Connection {ALPHA_VANTAGE_CONN_ID!r} has no password and '
             'ALPHA_VANTAGE_API_KEY (or ALPHA_VANTAGE_KEY) is not set. '
             'Get a free key at https://www.alphavantage.co/support/#api-key '
-            'and export it (or set it in docker-compose / .env).'
+            'and put it in .env for local compose (seeds the connection on boot).'
         )
     return key
 
 
 def get_transport() -> str:
     """Return the configured client transport: http, sse, stdio, or rest."""
-    raw = os.environ.get('ALPHA_VANTAGE_TRANSPORT', 'http').strip().lower()
+    raw = load_alpha_vantage_settings()['transport']
     transport = _TRANSPORT_ALIASES.get(raw)
     if not transport:
         valid = ', '.join(sorted(set(_TRANSPORT_ALIASES.values())))
@@ -84,13 +183,95 @@ def _with_apikey_query(url: str, api_key: str) -> str:
 
 
 def mcp_http_url(api_key: str | None = None) -> str:
-    base = os.environ.get('ALPHA_VANTAGE_MCP_URL', DEFAULT_MCP_HTTP_URL).strip() or DEFAULT_MCP_HTTP_URL
+    base = load_alpha_vantage_settings()['mcp_url']
     return _with_apikey_query(base, api_key or get_api_key())
 
 
 def mcp_sse_url(api_key: str | None = None) -> str:
-    base = os.environ.get('ALPHA_VANTAGE_MCP_SSE_URL', DEFAULT_MCP_SSE_URL).strip() or DEFAULT_MCP_SSE_URL
+    base = load_alpha_vantage_settings()['mcp_sse_url']
     return _with_apikey_query(base, api_key or get_api_key())
+
+
+def compose_connection_extra() -> dict[str, str]:
+    """Extras seeded into Connection alpha_vantage_default (compose MCP URLs)."""
+    transport = os.environ.get('ALPHA_VANTAGE_TRANSPORT', 'http').strip() or 'http'
+    mcp_url = (
+        os.environ.get('ALPHA_VANTAGE_MCP_URL', '').strip()
+        or DEFAULT_COMPOSE_MCP_HTTP_URL
+    )
+    mcp_sse_url = (
+        os.environ.get('ALPHA_VANTAGE_MCP_SSE_URL', '').strip()
+        or DEFAULT_COMPOSE_MCP_SSE_URL
+    )
+    return {
+        'transport': transport,
+        'mcp_url': mcp_url,
+        'mcp_sse_url': mcp_sse_url,
+    }
+
+
+def connection_import_document() -> dict:
+    """JSON document for seeding Connection alpha_vantage_default."""
+    extra = compose_connection_extra()
+    return {
+        ALPHA_VANTAGE_CONN_ID: {
+            'conn_type': 'generic',
+            'description': (
+                'Alpha Vantage MCP. Local compose seeds conn-password from '
+                'ALPHA_VANTAGE_API_KEY; production should use a secrets backend.'
+            ),
+            'password': _env_api_key(),
+            'extra': json.dumps(extra, sort_keys=True),
+        }
+    }
+
+
+def upsert_alpha_vantage_connection() -> str:
+    """
+    Add or replace Connection alpha_vantage_default from the environment.
+
+    Deletes the existing row with SQL (so a leftover password encrypted with a
+    different Fernet key cannot break decrypt-on-load), then inserts a new row.
+    Uses a Postgres advisory lock so compose services do not race.
+    """
+    from airflow.models.connection import Connection
+    from airflow.settings import Session
+    from sqlalchemy import text
+
+    doc = connection_import_document()
+    spec = doc[ALPHA_VANTAGE_CONN_ID]
+    password = spec.get('password') or ''
+    if not password:
+        return 'skipped-empty-password'
+
+    session = Session()
+    try:
+        session.execute(text('SELECT pg_advisory_lock(872511)'))
+        session.execute(
+            text('DELETE FROM connection WHERE conn_id = :cid'),
+            {'cid': ALPHA_VANTAGE_CONN_ID},
+        )
+        session.add(
+            Connection(
+                conn_id=ALPHA_VANTAGE_CONN_ID,
+                conn_type=spec['conn_type'],
+                password=password,
+                extra=spec['extra'],
+                description=spec['description'],
+            )
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        try:
+            session.execute(text('SELECT pg_advisory_unlock(872511)'))
+            session.commit()
+        except Exception:
+            session.rollback()
+        session.close()
+    return 'upserted'
 
 
 def stdio_server_spec(api_key: str | None = None) -> tuple[str, list[str]]:
