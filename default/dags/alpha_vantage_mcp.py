@@ -70,6 +70,18 @@ def _connection_or_none(conn_id: str = ALPHA_VANTAGE_CONN_ID):
 
         return BaseHook.get_connection(conn_id)
     except Exception:
+        pass
+    # Task SDK needs supervisor context; fall back to the metadata DB (compose seed).
+    try:
+        from airflow.models.connection import Connection
+        from airflow.settings import Session
+
+        session = Session()
+        try:
+            return session.query(Connection).filter(Connection.conn_id == conn_id).one_or_none()
+        finally:
+            session.close()
+    except Exception:
         return None
 
 
