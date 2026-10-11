@@ -30,6 +30,9 @@ x-airflow-common: &airflow-common
     ALPHA_VANTAGE_TRANSPORT: ${ALPHA_VANTAGE_TRANSPORT:-stdio}
     ALPHA_VANTAGE_MCP_STDIO_COMMAND: ${ALPHA_VANTAGE_MCP_STDIO_COMMAND:-marketdata-mcp}
     ALPHA_VANTAGE_MCP_STDIO_ARGS: ${ALPHA_VANTAGE_MCP_STDIO_ARGS-}
+    # Optional remote transports use direct URLs by default.
+    ALPHA_VANTAGE_MCP_URL: ${ALPHA_VANTAGE_MCP_URL:-https://mcp.alphavantage.co/mcp}
+    ALPHA_VANTAGE_MCP_SSE_URL: ${ALPHA_VANTAGE_MCP_SSE_URL:-https://mcp.alphavantage.co/sse}
     MEDALLION_DATA_DIR: /app/data/medallion
     AIRFLOW__CORE__PLUGINS_FOLDER: /app/plugins
     PYTHONPATH: /app/dags:/app/plugins

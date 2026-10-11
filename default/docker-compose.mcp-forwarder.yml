@@ -1,0 +1,44 @@
+# Opt-in host-network MCP forwarder for Linux/CI compose bridges that cannot SNAT.
+# Docker Desktop (Windows/Mac) does not support network_mode: host — do not use this
+# override there. Default compose talks directly to https://mcp.alphavantage.co/mcp.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.mcp-forwarder.yml up -d --build
+#
+# extra_hosts keeps the TLS name mcp.alphavantage.co while TCP lands on host:18080.
+
+services:
+  mcp-https-forwarder:
+    image: alpine/socat:1.8.0.3
+    network_mode: host
+    restart: unless-stopped
+    command: ["TCP-LISTEN:18080,fork,reuseaddr", "TCP:mcp.alphavantage.co:443"]
+
+  airflow-api-server:
+    depends_on:
+      mcp-https-forwarder:
+        condition: service_started
+    extra_hosts:
+      - "mcp.alphavantage.co:host-gateway"
+    environment:
+      ALPHA_VANTAGE_MCP_URL: ${ALPHA_VANTAGE_MCP_URL:-https://mcp.alphavantage.co:18080/mcp}
+      ALPHA_VANTAGE_MCP_SSE_URL: ${ALPHA_VANTAGE_MCP_SSE_URL:-https://mcp.alphavantage.co:18080/sse}
+
+  airflow-scheduler:
+    depends_on:
+      mcp-https-forwarder:
+        condition: service_started
+    extra_hosts:
+      - "mcp.alphavantage.co:host-gateway"
+    environment:
+      ALPHA_VANTAGE_MCP_URL: ${ALPHA_VANTAGE_MCP_URL:-https://mcp.alphavantage.co:18080/mcp}
+      ALPHA_VANTAGE_MCP_SSE_URL: ${ALPHA_VANTAGE_MCP_SSE_URL:-https://mcp.alphavantage.co:18080/sse}
+
+  airflow-dag-processor:
+    depends_on:
+      mcp-https-forwarder:
+        condition: service_started
+    extra_hosts:
+      - "mcp.alphavantage.co:host-gateway"
+    environment:
+      ALPHA_VANTAGE_MCP_URL: ${ALPHA_VANTAGE_MCP_URL:-https://mcp.alphavantage.co:18080/mcp}
+      ALPHA_VANTAGE_MCP_SSE_URL: ${ALPHA_VANTAGE_MCP_SSE_URL:-https://mcp.alphavantage.co:18080/sse}

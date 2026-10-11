@@ -6,6 +6,8 @@ Containerized **Apache Airflow 3.3.1** (Python 3.12) with PostgreSQL, Redis, and
 
 **Prerequisites:** Docker Compose, a free [Alpha Vantage API key](https://www.alphavantage.co/support/#api-key), local Python **3.12+** for tests.
 
+> **Where to run Compose:** Linux or WSL on Windows. MCP defaults to a bundled local stdio process inside the Airflow container; it requires outbound internet access to Alpha Vantage but no MCP port-forwarding service.
+
 ```bash
 cp .env.example .env
 # Set ALPHA_VANTAGE_API_KEY — never commit .env
@@ -25,9 +27,9 @@ docker compose down
 | Field | Source |
 |-------|--------|
 | conn-password | `ALPHA_VANTAGE_API_KEY` |
-| extra `transport` | `ALPHA_VANTAGE_TRANSPORT` (default `http`) |
-| extra `mcp_url` | compose default `https://mcp.alphavantage.co:18080/mcp` |
-| extra `mcp_sse_url` | compose default `https://mcp.alphavantage.co:18080/sse` |
+| extra `transport` | `ALPHA_VANTAGE_TRANSPORT` (default `stdio`) |
+| extra `mcp_url` | compose default `https://mcp.alphavantage.co/mcp` |
+| extra `mcp_sse_url` | compose default `https://mcp.alphavantage.co/sse` |
 
 Tasks read the key and extras with `BaseHook.get_connection('alpha_vantage_default')` (metadata DB fallback outside a task; env fallback for unit tests). Compose pins `AIRFLOW__CORE__FERNET_KEY` so every service can decrypt the password.
 
@@ -43,6 +45,19 @@ Production: use an Airflow secrets backend. Do not rely on `.env`. The key is ne
 | `rest` | Legacy `www.alphavantage.co/query` (not MCP) |
 
 In the default local mode, Airflow launches the official MCP server as a bundled stdio subprocess inside its own container; no host-network forwarder, runtime package download, or MCP port is used. The server still requires outbound internet access to call Alpha Vantage.
+
+For an explicit remote `http` or `sse` transport, set the corresponding MCP URL in `.env`; direct URLs are the default supported route for Docker Desktop and WSL. The host-network forwarder is not used by the local stdio setup.
+
+**Optional Linux/CI forwarder** (only for bridges that cannot reach the internet directly): `host:18080` → `mcp.alphavantage.co:443`.
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.mcp-forwarder.yml up -d --build
+# and in .env:
+# ALPHA_VANTAGE_MCP_URL=https://mcp.alphavantage.co:18080/mcp
+# ALPHA_VANTAGE_MCP_SSE_URL=https://mcp.alphavantage.co:18080/sse
+```
+
+**Windows Desktop UI caveat** (from real use): published ports such as Airflow `8080` can still fail under Desktop’s Windows port forwarding even with a working MCP URL. Run Compose from **Linux** or **WSL** for the UI.
 
 ## Sample DAGs
 
@@ -145,7 +160,8 @@ Free-tier ~5 req/min; pause defaults to 15s (`ALPHA_VANTAGE_REQUEST_PAUSE_SECOND
 ```
 default/                       # this Airflow project
 ├── Dockerfile
-├── docker-compose.yml      # api-server, scheduler, dag-processor, postgres, redis, MCP forwarder
+├── docker-compose.yml      # api-server, scheduler, dag-processor, postgres, redis (direct MCP)
+├── docker-compose.mcp-forwarder.yml  # opt-in host-network MCP forwarder (Linux/CI)
 ├── entrypoint.sh           # migrate, admin user, Connection seed, warehouse DDL
 ├── requirements.txt
 ├── .env.example
@@ -169,6 +185,7 @@ See `docker-compose.yml` for Airflow. Commodity / MCP:
 - `ALPHA_VANTAGE_API_KEY` — seeds Connection `alpha_vantage_default` (do not commit `.env`)
 - `ALPHA_VANTAGE_TRANSPORT` — `stdio` by default; also `http` / `sse` / `rest`
 - `ALPHA_VANTAGE_MCP_STDIO_COMMAND` / `ALPHA_VANTAGE_MCP_STDIO_ARGS` — local server command and arguments
+- `ALPHA_VANTAGE_MCP_URL` / `ALPHA_VANTAGE_MCP_SSE_URL` — direct remote endpoints when using `http` or `sse`
 - `MEDALLION_DATA_DIR` — default `/app/data/medallion`
 - `ALPHA_VANTAGE_INTERVAL` — `monthly` (default) or `daily`
 - `ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS` — default `15`
