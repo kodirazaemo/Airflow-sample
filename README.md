@@ -1,3 +1,3 @@
 Airflow sample lives in [default/](default/README.md) (Airflow 3.3.1, Compose, medallion DAG). MCP defaults to **direct** `https://mcp.alphavantage.co/mcp`. Run Compose from **Linux** or **WSL on Windows** — Docker Desktop (Windows) port forwarding has been unreliable for the UI; the host-network MCP forwarder is opt-in for Linux/CI only.
 
-Optional AWS IaC is in [terraform/](terraform/README.md) (Bronze S3 bucket, optional RDS). Do not apply in CI; no cloud credentials in the repo.
+Local Compose maps to the same AWS **roles** (RDS, S3, ElastiCache, MWAA) — see [Local vs AWS](default/README.md#local-vs-aws). It does not auto-deploy to AWS. Optional IaC in [terraform/](terraform/README.md) sketches a Bronze S3 bucket and optional RDS only. Do not apply in CI; no cloud credentials in the repo.

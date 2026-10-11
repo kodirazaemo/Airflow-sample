@@ -193,9 +193,22 @@ See `docker-compose.yml` for Airflow. Commodity / MCP:
 - `BRONZE_PROFILE_FAIL_ON_ERROR` — default `true` (fail the DAG on empty/unparseable bronze)
 - `BRONZE_PROFILE_WARN_MIN_POINTS` — default `5` (spot quotes warn, they do not fail)
 
+## Local vs AWS
+
+Compose is a **local stand-in for the same roles** as managed AWS — Postgres, object files, Redis, and the Airflow control plane. It does **not** auto-deploy to AWS. `docker compose up` stays on your machine.
+
+| Local | AWS |
+|-------|-----|
+| Local Docker Postgres (Airflow metadata and `bronze` / `silver` / `gold`) | AWS RDS (PostgreSQL) |
+| Local `data/medallion/` JSON drops | AWS S3 (raw object data lake) |
+| Containerized Redis (Compose service; this sample does not use it as a Celery broker) | AWS ElastiCache (Redis) |
+| Local Docker executor (`AIRFLOW__CORE__EXECUTOR: LocalExecutor` in `docker-compose.yml`; not Celery) | AWS MWAA (Managed Apache Airflow) |
+
+Repo-root [`../terraform/`](../terraform/README.md) already sketches a versioned S3 bronze bucket and optional RDS Postgres. It does not create MWAA or ElastiCache. Do not commit credentials; CI does not apply Terraform.
+
 ## Infrastructure as code
 
-Optional AWS sample at repo root [`../terraform/`](../terraform/README.md) (sibling of `default/`): versioned S3 for Bronze objects and an optional RDS Postgres warehouse. Local Compose Postgres is enough to run this sample. Do not commit credentials; CI does not apply Terraform.
+See [Local vs AWS](#local-vs-aws) and [`../terraform/`](../terraform/README.md). Local Compose Postgres is enough to run this sample.
 
 ## Tests
 
