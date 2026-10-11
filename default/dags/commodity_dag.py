@@ -37,6 +37,7 @@ from medallion import (
     load_obv_quality,
     load_silver_quotes,
     load_silver_series,
+    replace_gold_trade_signals,
     replace_silver_symbol,
     upsert_obv_quality,
     write_bronze_snapshot,
@@ -996,6 +997,7 @@ def compute_gold(**context):
         for name, result in components.items():
             print(f"  - {name}: {result['action']} | {result['detail']}")
 
+    replace_gold_trade_signals(ds, signals)
     context['ti'].xcom_push(key='gold_metrics', value=metrics)
     context['ti'].xcom_push(key='trading_signals', value=signals)
     return {'metrics': metrics, 'signals': signals}

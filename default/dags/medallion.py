@@ -24,6 +24,7 @@ SILVER_QUOTES = 'silver.commodity_quotes'
 SILVER_SERIES = 'silver.commodity_price_series'
 GOLD_METRICS = 'gold.commodity_metrics'
 GOLD_OBV_QUALITY = 'gold.obv_quality'
+GOLD_TRADE_SIGNALS = 'gold.trading_signals'
 
 
 def data_dir() -> Path:
@@ -120,6 +121,7 @@ def init_warehouse() -> None:
         silver_series = _table(SILVER_SERIES)
         gold_metrics = _table(GOLD_METRICS)
         gold_quality = _table(GOLD_OBV_QUALITY)
+        gold_signals = _table(GOLD_TRADE_SIGNALS)
 
         cur.execute(
             f'''
@@ -192,6 +194,24 @@ def init_warehouse() -> None:
                 obv_price_correlation DOUBLE PRECISION,
                 agreement DOUBLE PRECISION,
                 detail TEXT,
+                PRIMARY KEY (trading_date, symbol)
+            )
+            '''
+        )
+        cur.execute(
+            f'''
+            CREATE TABLE IF NOT EXISTS {gold_signals} (
+                trading_date TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                action TEXT NOT NULL,
+                weighted_score DOUBLE PRECISION NOT NULL,
+                price DOUBLE PRECISION NOT NULL,
+                unit TEXT,
+                change_pct DOUBLE PRECISION,
+                reason TEXT,
+                components_json TEXT NOT NULL,
+                weights_json TEXT NOT NULL,
+                generated_at TEXT NOT NULL,
                 PRIMARY KEY (trading_date, symbol)
             )
             '''
@@ -509,6 +529,73 @@ def compute_gold_metrics_sql(trading_date: str) -> list[dict]:
             }
         )
     return metrics
+
+
+def replace_gold_trade_signals(trading_date: str, signals: dict[str, dict]) -> None:
+    """Replace Gold BUY/SELL/HOLD signals for one trading date."""
+    init_warehouse()
+    with warehouse_connection() as conn:
+        cur = conn.cursor()
+        ph = _placeholder(conn)
+        table = _table(GOLD_TRADE_SIGNALS)
+        cur.execute(f'DELETE FROM {table} WHERE trading_date = {ph}', (trading_date,))
+        for symbol, signal in signals.items():
+            cur.execute(
+                f'''
+                INSERT INTO {table}
+                    (trading_date, symbol, action, weighted_score, price, unit,
+                     change_pct, reason, components_json, weights_json, generated_at)
+                VALUES ({', '.join([ph] * 11)})
+                ''',
+                (
+                    trading_date,
+                    symbol,
+                    signal['action'],
+                    signal['weighted_score'],
+                    signal['price'],
+                    signal.get('unit'),
+                    signal.get('change_pct'),
+                    signal.get('reason'),
+                    json.dumps(signal.get('components') or {}, sort_keys=True),
+                    json.dumps(signal.get('weights') or {}, sort_keys=True),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+        cur.close()
+
+
+def load_gold_trade_signals(trading_date: str) -> dict[str, dict]:
+    """Load persisted Gold signals for one trading date, keyed by symbol."""
+    init_warehouse()
+    with warehouse_connection() as conn:
+        cur = conn.cursor()
+        ph = _placeholder(conn)
+        cur.execute(
+            f'''
+            SELECT symbol, action, weighted_score, price, unit, change_pct, reason,
+                   components_json, weights_json, generated_at
+            FROM {_table(GOLD_TRADE_SIGNALS)}
+            WHERE trading_date = {ph}
+            ORDER BY symbol
+            ''',
+            (trading_date,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+    return {
+        row[0]: {
+            'action': row[1],
+            'weighted_score': row[2],
+            'price': row[3],
+            'unit': row[4],
+            'change_pct': row[5],
+            'reason': row[6],
+            'components': json.loads(row[7]),
+            'weights': json.loads(row[8]),
+            'generated_at': row[9],
+        }
+        for row in rows
+    }
 
 
 def upsert_obv_quality(trading_date: str, symbol: str, quality: dict) -> None:

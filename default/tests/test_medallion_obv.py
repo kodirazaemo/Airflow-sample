@@ -87,6 +87,19 @@ class MedallionAndObvTests(unittest.TestCase):
         self.assertEqual(snapshot['function'], 'WTI')
         self.assertIn('data', snapshot['payload'])
 
+    def test_medallion_explicit_connection_overrides_airflow_config(self):
+        with patch.dict(
+            os.environ,
+            {
+                'MEDALLION_SQLALCHEMY_CONN': 'postgresql+psycopg2://warehouse/db',
+                'AIRFLOW__DATABASE__SQL_ALCHEMY_CONN': '',
+            },
+        ):
+            self.assertEqual(
+                self.warehouse.warehouse_url(),
+                'postgresql+psycopg2://warehouse/db',
+            )
+
     def test_silver_gold_sql_and_obv_quality_loop(self):
         ds = '2024-06-01'
         rising = [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
@@ -115,6 +128,14 @@ class MedallionAndObvTests(unittest.TestCase):
         self.assertEqual(metrics[0]['latest_price'], 20)
         self.assertEqual(metrics[0]['min_price'], 10)
         self.assertGreater(metrics[0]['period_return_pct'], 0)
+        persisted_signals = self.warehouse.load_gold_trade_signals(ds)
+        self.assertEqual(persisted_signals['CRUDE_OIL']['action'], 'BUY')
+        self.assertEqual(persisted_signals['CRUDE_OIL']['weighted_score'], 0.25)
+        self.assertEqual(
+            persisted_signals['CRUDE_OIL']['components']['momentum']['action'],
+            'BUY',
+        )
+        self.assertIn('generated_at', persisted_signals['CRUDE_OIL'])
         self.assertGreater(quality['CRUDE_OIL']['quality_score'], 0.5)
         self.assertEqual(quality['CRUDE_OIL']['obv_action'], 'BUY')
         self.assertEqual(quality['CRUDE_OIL']['price_trend_action'], 'BUY')

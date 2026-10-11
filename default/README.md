@@ -83,7 +83,7 @@ docker compose -f docker-compose.yml -f docker-compose.mcp-forwarder.yml up -d -
 | Bronze | Immutable raw extract | `extract_bronze` → `bronze.mcp_snapshots` |
 | Profile | Stats / fail-or-warn before silver | `profile_bronze` (plugin `bronze_data_profiler`) |
 | Silver | Validated / typed tables | `transform_silver` → `silver.commodity_quotes` |
-| Gold | Metrics a BI tool can read | `compute_gold` → `gold.commodity_metrics`; `score_obv_data_quality` → `gold.obv_quality` |
+| Gold | Metrics and trading signals | `compute_gold` → `gold.commodity_metrics`, `gold.trading_signals`; `score_obv_data_quality` → `gold.obv_quality` |
 
 How Connection `alpha_vantage_default` feeds bronze, then the `commodity_trading_dag` task graph (names match `commodity_dag.py`).
 
@@ -118,6 +118,7 @@ flowchart LR
   profile -.-> plugin["plugins/bronze_data_profiler.py"]
   silver -.-> stbl["silver.commodity_quotes"]
   gold -.-> gtbl["gold.commodity_metrics"]
+  gold -.-> sigtbl["gold.trading_signals"]
   obv -.-> qtbl["gold.obv_quality"]
 ```
 
@@ -132,12 +133,12 @@ Postgres schemas `bronze` / `silver` / `gold` (same instance as Airflow metadata
 | `extract_bronze` | Bronze | Immutable MCP/REST payload (`bronze.mcp_snapshots` + `data/medallion/bronze/<ds>/<symbol>.json`). **Skips MCP** if that snapshot already exists. |
 | `profile_bronze` | Quality | Row counts, numeric coverage, placeholder rate, duplicate dates. **Errors fail**; short/sparse series **warn**. |
 | `transform_silver` | Silver | Schema / nulls / non-positive checks → `silver.commodity_quotes`, `silver.commodity_price_series` |
-| `compute_gold` | Gold | **SQL** metrics in `gold.commodity_metrics` (latest/min/max/avg, count, period return) plus weighted signals |
+| `compute_gold` | Gold | **SQL** metrics in `gold.commodity_metrics` (latest/min/max/avg, count, period return) and per-symbol actions, weighted scores, and component details in `gold.trading_signals` |
 | `score_obv_data_quality` | Gold | Synthetic-volume `compute_obv_signal` vs linear price trend → `gold.obv_quality` |
 | `generate_trade_orders` | — | Notional BUY/SELL orders |
 | `publish_daily_report` | — | Summary including gold metrics and OBV quality scores |
 
-BI can read `gold.commodity_metrics` and `gold.obv_quality`. Unit tests use SQLite + temp JSON.
+BI can read `gold.commodity_metrics`, `gold.obv_quality`, and `gold.trading_signals`. Signals are keyed by `trading_date` and `symbol`; `components_json` and `weights_json` retain the indicator breakdown. Unit tests use SQLite + temp JSON.
 
 On retry you should see `Reusing bronze snapshot for GOLD ... (skip MCP)` instead of another live fetch.
 
