@@ -9,7 +9,8 @@ https://mcp.alphavantage.co/#connection-examples :
 - sse: legacy HTTP+SSE
   https://mcp.alphavantage.co/sse?apikey=YOUR_API_KEY
 - stdio: local server
-  uvx marketdata-mcp-server YOUR_API_KEY
+    uvx --with mcp==1.12.3 --with pydantic==2.11.7
+            --from marketdata-mcp-server marketdata-mcp YOUR_API_KEY
 
 Secrets come from Airflow Connection ``alpha_vantage_default`` (password =
 API key; extra = transport / mcp_url / mcp_sse_url). Local compose seeds
@@ -36,7 +37,12 @@ DEFAULT_MCP_SSE_URL = 'https://mcp.alphavantage.co/sse'
 DEFAULT_COMPOSE_MCP_HTTP_URL = 'https://mcp.alphavantage.co:18080/mcp'
 DEFAULT_COMPOSE_MCP_SSE_URL = 'https://mcp.alphavantage.co:18080/sse'
 DEFAULT_STDIO_COMMAND = 'uvx'
-DEFAULT_STDIO_ARGS = ('marketdata-mcp-server',)
+DEFAULT_STDIO_ARGS = (
+    '--with', 'mcp==1.12.3',
+    '--with', 'pydantic==2.11.7',
+    '--from', 'marketdata-mcp-server',
+    'marketdata-mcp',
+)
 ALPHA_VANTAGE_CONN_ID = 'alpha_vantage_default'
 
 _TRANSPORT_ALIASES = {
@@ -277,8 +283,8 @@ def upsert_alpha_vantage_connection() -> str:
 def stdio_server_spec(api_key: str | None = None) -> tuple[str, list[str]]:
     key = api_key or get_api_key()
     command = os.environ.get('ALPHA_VANTAGE_MCP_STDIO_COMMAND', DEFAULT_STDIO_COMMAND).strip() or DEFAULT_STDIO_COMMAND
-    raw_args = os.environ.get('ALPHA_VANTAGE_MCP_STDIO_ARGS', ' '.join(DEFAULT_STDIO_ARGS)).strip()
-    args = raw_args.split() if raw_args else list(DEFAULT_STDIO_ARGS)
+    raw_args = os.environ.get('ALPHA_VANTAGE_MCP_STDIO_ARGS')
+    args = raw_args.split() if raw_args is not None else list(DEFAULT_STDIO_ARGS)
     if args[-1:] != [key]:
         args.append(key)
     return command, args

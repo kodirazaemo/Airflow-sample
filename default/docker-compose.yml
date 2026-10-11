@@ -7,8 +7,6 @@ x-airflow-common: &airflow-common
       condition: service_healthy
     redis:
       condition: service_healthy
-    mcp-https-forwarder:
-      condition: service_started
   environment: &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__CORE__DAGS_FOLDER: /app/dags
@@ -28,22 +26,13 @@ x-airflow-common: &airflow-common
     ALPHA_VANTAGE_KEY: ${ALPHA_VANTAGE_KEY:-}
     ALPHA_VANTAGE_INTERVAL: ${ALPHA_VANTAGE_INTERVAL:-monthly}
     ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS: ${ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS:-15}
-    # MCP connection: http (default Streamable HTTP), sse, stdio, or rest (legacy REST).
-    # Docs: https://mcp.alphavantage.co/#connection-examples
-    ALPHA_VANTAGE_TRANSPORT: ${ALPHA_VANTAGE_TRANSPORT:-http}
-    # TLS to MCP goes through mcp-https-forwarder on the host network (port 18080).
-    # extra_hosts keeps the certificate hostname mcp.alphavantage.co while TCP
-    # lands on the host, which can reach the internet when the compose bridge cannot.
-    ALPHA_VANTAGE_MCP_URL: ${ALPHA_VANTAGE_MCP_URL:-https://mcp.alphavantage.co:18080/mcp}
-    ALPHA_VANTAGE_MCP_SSE_URL: ${ALPHA_VANTAGE_MCP_SSE_URL:-https://mcp.alphavantage.co:18080/sse}
-    ALPHA_VANTAGE_MCP_STDIO_COMMAND: ${ALPHA_VANTAGE_MCP_STDIO_COMMAND:-uvx}
-    ALPHA_VANTAGE_MCP_STDIO_ARGS: ${ALPHA_VANTAGE_MCP_STDIO_ARGS:-marketdata-mcp-server}
+    # Run the official MCP server as a local stdio subprocess in each Airflow task.
+    ALPHA_VANTAGE_TRANSPORT: ${ALPHA_VANTAGE_TRANSPORT:-stdio}
+    ALPHA_VANTAGE_MCP_STDIO_COMMAND: ${ALPHA_VANTAGE_MCP_STDIO_COMMAND:-marketdata-mcp}
+    ALPHA_VANTAGE_MCP_STDIO_ARGS: ${ALPHA_VANTAGE_MCP_STDIO_ARGS-}
     MEDALLION_DATA_DIR: /app/data/medallion
     AIRFLOW__CORE__PLUGINS_FOLDER: /app/plugins
     PYTHONPATH: /app/dags:/app/plugins
-  extra_hosts:
-    - "mcp.alphavantage.co:host-gateway"
-    - "host.docker.internal:host-gateway"
   volumes:
     - ./dags:/app/dags
     - ./plugins:/app/plugins
@@ -51,17 +40,6 @@ x-airflow-common: &airflow-common
     - ./data:/app/data
 
 services:
-  # Host-network TLS forwarder so Airflow workers can reach Alpha Vantage MCP
-  # when the compose bridge cannot SNAT to the public internet (common on
-  # nested/CI VMs). Docker Desktop for Mac/Windows does not support host
-  # networking: set ALPHA_VANTAGE_MCP_URL=https://mcp.alphavantage.co/mcp
-  # (and the SSE URL without :18080) so workers talk to Cloudflare directly.
-  mcp-https-forwarder:
-    image: alpine/socat:1.8.0.3
-    network_mode: host
-    restart: unless-stopped
-    command: ["TCP-LISTEN:18080,fork,reuseaddr", "TCP:mcp.alphavantage.co:443"]
-
   postgres:
     image: postgres:15-alpine
     environment:

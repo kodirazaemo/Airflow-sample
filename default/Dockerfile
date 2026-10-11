@@ -24,6 +24,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=base /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=base /usr/local/bin /usr/local/bin
 
+RUN pip install --no-cache-dir uv \
+    && uv tool install --python 3.13 \
+        --with mcp==1.12.3 \
+        --with pydantic==2.11.7 \
+        marketdata-mcp-server
+
+ENV PATH="/root/.local/bin:${PATH}"
+
 COPY dags ./dags
 COPY plugins ./plugins
 COPY entrypoint.sh .

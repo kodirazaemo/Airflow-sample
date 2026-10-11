@@ -90,7 +90,29 @@ class TransportConfigTests(unittest.TestCase):
     def test_stdio_spec_matches_uvx_docs(self):
         command, args = stdio_server_spec('secret-test-key')
         self.assertEqual(command, 'uvx')
-        self.assertEqual(args, ['marketdata-mcp-server', 'secret-test-key'])
+        self.assertEqual(
+            args,
+            [
+                '--with', 'mcp==1.12.3',
+                '--with', 'pydantic==2.11.7',
+                '--from', 'marketdata-mcp-server',
+                'marketdata-mcp',
+                'secret-test-key',
+            ],
+        )
+
+    def test_stdio_spec_supports_preinstalled_command_without_extra_args(self):
+        with patch.dict(
+            os.environ,
+            {
+                'ALPHA_VANTAGE_MCP_STDIO_COMMAND': 'marketdata-mcp',
+                'ALPHA_VANTAGE_MCP_STDIO_ARGS': '',
+            },
+        ):
+            command, args = stdio_server_spec('secret-test-key')
+
+        self.assertEqual(command, 'marketdata-mcp')
+        self.assertEqual(args, ['secret-test-key'])
 
     def test_redact_does_not_leak_key_in_exception_text(self):
         leaked = 'Failed https://mcp.alphavantage.co/mcp?apikey=secret-test-key timeout'

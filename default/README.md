@@ -37,26 +37,16 @@ Production: use an Airflow secrets backend. Do not rely on `.env`. The key is ne
 
 | `ALPHA_VANTAGE_TRANSPORT` | Path |
 |---------------------------|------|
-| `http` (default) | Streamable HTTP |
+| `http` | Streamable HTTP |
 | `sse` | Legacy HTTP+SSE |
-| `stdio` | Local `uvx marketdata-mcp-server` (needs `uvx`) |
+| `stdio` (default) | Bundled `marketdata-mcp` subprocess in the Airflow container; MCP 1.12.3 and Pydantic 2.11.7 are pinned for compatibility |
 | `rest` | Legacy `www.alphavantage.co/query` (not MCP) |
 
-### Docker Desktop vs host-network forwarder
-
-Compose includes `mcp-https-forwarder` (`host:18080` → `mcp.alphavantage.co:443`) and `extra_hosts` so Airflow containers keep the TLS name `mcp.alphavantage.co`. Use this when the **compose bridge cannot SNAT** to the public internet (nested VMs, some CI). That is separate from `net.bridge.bridge-nf-call-iptables=0`, which only affects container-to-container traffic.
-
-**Docker Desktop (Mac/Windows)** does not support `network_mode: host`. Skip the forwarder and talk to Cloudflare directly:
-
-```bash
-# in .env
-ALPHA_VANTAGE_MCP_URL=https://mcp.alphavantage.co/mcp
-ALPHA_VANTAGE_MCP_SSE_URL=https://mcp.alphavantage.co/sse
-```
+In the default local mode, Airflow launches the official MCP server as a bundled stdio subprocess inside its own container; no host-network forwarder, runtime package download, or MCP port is used. The server still requires outbound internet access to call Alpha Vantage.
 
 ## Sample DAGs
 
-1. Enable and trigger **`alpha_vantage_mcp_read`** (manual): `list_mcp_tools` (`tools/list`) then `read_wti_monthly` (`tools/call` WTI monthly).
+1. Enable and trigger **`alpha_vantage_mcp_read`** (manual): `list_mcp_tools` (`TOOL_LIST`) then `read_wti_monthly` (`TOOL_GET` + `TOOL_CALL` WTI monthly).
 2. Daily **`commodity_trading_dag`** — medallion pipeline for gold, WTI, wheat, copper, natural gas.
 
 ## Workflow schema
@@ -177,8 +167,8 @@ terraform/                  # repo-root sibling of default/: optional AWS S3 (+ 
 See `docker-compose.yml` for Airflow. Commodity / MCP:
 
 - `ALPHA_VANTAGE_API_KEY` — seeds Connection `alpha_vantage_default` (do not commit `.env`)
-- `ALPHA_VANTAGE_TRANSPORT` — `http` / `sse` / `stdio` / `rest`
-- `ALPHA_VANTAGE_MCP_URL` / `ALPHA_VANTAGE_MCP_SSE_URL` — forwarder defaults `:18080`; Desktop: URLs without the port
+- `ALPHA_VANTAGE_TRANSPORT` — `stdio` by default; also `http` / `sse` / `rest`
+- `ALPHA_VANTAGE_MCP_STDIO_COMMAND` / `ALPHA_VANTAGE_MCP_STDIO_ARGS` — local server command and arguments
 - `MEDALLION_DATA_DIR` — default `/app/data/medallion`
 - `ALPHA_VANTAGE_INTERVAL` — `monthly` (default) or `daily`
 - `ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS` — default `15`

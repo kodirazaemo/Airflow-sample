@@ -3,8 +3,8 @@ Manual Alpha Vantage MCP read sample.
 
 Trigger this DAG to:
 1. Connect to the Alpha Vantage MCP server (HTTP / SSE / stdio)
-2. Discover tools via tools/list
-3. Call WTI (monthly) via tools/call
+2. Discover Alpha Vantage APIs via TOOL_LIST
+3. Read WTI (monthly) via TOOL_GET and TOOL_CALL
 
 Local compose seeds Connection ``alpha_vantage_default`` from .env
 (never commit a real key). Tasks read it via BaseHook.get_connection.
@@ -34,9 +34,11 @@ def list_alpha_vantage_mcp_tools(**context):
             '(not rest). See https://mcp.alphavantage.co/#connection-examples'
         )
     with AlphaVantageMcpClient() as client:
-        tools = client.list_tools()
-    print(f'Alpha Vantage MCP transport={transport}; tools={len(tools)}')
-    preview = tools[:25]
+        catalog = client.call_tool('TOOL_LIST', {})
+    tools = catalog.get('data') or []
+    tool_names = [tool.get('name', '') for tool in tools if isinstance(tool, dict)]
+    print(f'Alpha Vantage MCP transport={transport}; tools={len(tool_names)}')
+    preview = tool_names[:25]
     print('Sample tools:', ', '.join(preview))
     context['ti'].xcom_push(key='mcp_tools', value=preview)
     context['ti'].xcom_push(key='mcp_tool_count', value=len(tools))
@@ -45,7 +47,14 @@ def list_alpha_vantage_mcp_tools(**context):
 
 def read_wti_via_mcp(**context):
     with AlphaVantageMcpClient() as client:
-        payload = client.call_tool('WTI', {'interval': 'monthly'})
+        client.call_tool('TOOL_GET', {'tool_name': 'wti'})
+        payload = client.call_tool(
+            'TOOL_CALL',
+            {
+                'tool_name': 'wti',
+                'arguments': {'interval': 'monthly', 'datatype': 'json'},
+            },
+        )
     rows = payload.get('data') or []
     print(
         f"MCP tools/call WTI monthly returned {len(rows)} rows; "
@@ -63,7 +72,7 @@ def read_wti_via_mcp(**context):
 with DAG(
     dag_id='alpha_vantage_mcp_read',
     default_args=default_args,
-    description='Manual Alpha Vantage MCP tools/list + WTI tools/call',
+    description='Manual Alpha Vantage MCP TOOL_LIST + WTI TOOL_GET/TOOL_CALL',
     start_date=datetime(2024, 1, 1),
     schedule=None,
     catchup=False,
