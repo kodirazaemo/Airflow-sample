@@ -5,7 +5,8 @@ from __future__ import annotations
 import os
 import sys
 import unittest
-from types import ModuleType
+from datetime import datetime, timezone
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 
@@ -110,6 +111,24 @@ class CommodityMcpFetchTests(unittest.TestCase):
         rest.assert_called_once()
         self.assertEqual(quote['price'], 12.5)
         self.assertEqual(quote['source'], 'alpha_vantage_rest')
+
+    def test_manual_session_markers_use_run_after_without_ds(self):
+        context = {
+            'dag_run': SimpleNamespace(
+                run_after=datetime(2026, 10, 11, 15, 49, tzinfo=timezone.utc)
+            )
+        }
+
+        opened = self.dag_module.open_trading_session(**context)
+        closed = self.dag_module.close_trading_session(**context)
+
+        self.assertEqual(opened['trading_date'], '2026-10-11')
+        self.assertEqual(closed['trading_date'], '2026-10-11')
+
+    def test_request_pause_defaults_to_fifteen_seconds(self):
+        with patch.dict(os.environ, {}, clear=True):
+            os.environ.pop('ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS', None)
+            self.assertEqual(self.dag_module._request_pause_seconds(), 15.0)
 
     def test_mcp_read_dag_imports(self):
         import alpha_vantage_mcp_read_dag as read_dag

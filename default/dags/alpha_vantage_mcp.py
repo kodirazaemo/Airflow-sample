@@ -504,7 +504,20 @@ class AlphaVantageMcpClient:
 
     def call_tool(self, name: str, arguments: dict | None = None) -> dict:
         try:
-            result = self._run(self._session.call_tool(name, arguments or {}))
+            call_name = name
+            call_arguments = arguments or {}
+            if self.transport == 'stdio' and name not in {'TOOL_LIST', 'TOOL_GET', 'TOOL_CALL'}:
+                api_name = name.lower()
+                schema_result = self._run(
+                    self._session.call_tool('TOOL_GET', {'tool_name': api_name})
+                )
+                parse_mcp_tool_result(schema_result)
+                call_name = 'TOOL_CALL'
+                call_arguments = {
+                    'tool_name': api_name,
+                    'arguments': call_arguments,
+                }
+            result = self._run(self._session.call_tool(call_name, call_arguments))
             return parse_mcp_tool_result(result)
         except Exception as exc:
             raise RuntimeError(

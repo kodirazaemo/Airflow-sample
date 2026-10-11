@@ -349,6 +349,37 @@ class MockedMcpSessionTests(unittest.TestCase):
         self.assertEqual(payload['data'][0]['value'], '71.25')
         self.assertEqual(fake.calls, [('WTI', {'interval': 'monthly'})])
 
+    def test_stdio_call_translates_api_name_to_progressive_discovery(self):
+        fake = FakeSession()
+
+        @asynccontextmanager
+        async def factory(transport, api_key):
+            self.assertEqual(transport, 'stdio')
+            self.assertEqual(api_key, 'secret-test-key')
+            yield fake
+
+        with AlphaVantageMcpClient(
+            api_key='secret-test-key',
+            transport='stdio',
+            session_cm_factory=factory,
+        ) as client:
+            payload = client.call_tool('GOLD_SILVER_HISTORY', {'interval': 'monthly'})
+
+        self.assertEqual(payload['data'][0]['value'], '71.25')
+        self.assertEqual(
+            fake.calls,
+            [
+                ('TOOL_GET', {'tool_name': 'gold_silver_history'}),
+                (
+                    'TOOL_CALL',
+                    {
+                        'tool_name': 'gold_silver_history',
+                        'arguments': {'interval': 'monthly'},
+                    },
+                ),
+            ],
+        )
+
     def test_call_tool_errors_are_redacted(self):
         @asynccontextmanager
         async def factory(transport, api_key):

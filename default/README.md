@@ -62,7 +62,7 @@ docker compose -f docker-compose.yml -f docker-compose.mcp-forwarder.yml up -d -
 ## Sample DAGs
 
 1. Enable and trigger **`alpha_vantage_mcp_read`** (manual): `list_mcp_tools` (`TOOL_LIST`) then `read_wti_monthly` (`TOOL_GET` + `TOOL_CALL` WTI monthly).
-2. Daily **`commodity_trading_dag`** — medallion pipeline for gold, WTI, wheat, copper, natural gas.
+2. **`commodity_trading_dag`** runs every 2 minutes until paused; it processes gold, WTI, wheat, copper, and natural gas.
 
 ## Workflow schema
 
@@ -153,7 +153,7 @@ Weighted score: **BUY** ≥ `0.25`, **SELL** ≤ `-0.25`, else **HOLD**.
 | `COPPER` | `COPPER` | monthly only |
 | `WHEAT` | `WHEAT` | monthly only |
 
-Free-tier ~5 req/min; pause defaults to 15s (`ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS`). `demo` only covers a subset of endpoints.
+Free-tier ~5 req/min; pause defaults to 15s between calls (`ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS`). `commodity_trading_dag` allows one active run to avoid overlapping API calls.
 
 ## Project structure
 
@@ -188,7 +188,7 @@ See `docker-compose.yml` for Airflow. Commodity / MCP:
 - `ALPHA_VANTAGE_MCP_URL` / `ALPHA_VANTAGE_MCP_SSE_URL` — direct remote endpoints when using `http` or `sse`
 - `MEDALLION_DATA_DIR` — default `/app/data/medallion`
 - `ALPHA_VANTAGE_INTERVAL` — `monthly` (default) or `daily`
-- `ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS` — default `15`
+- `ALPHA_VANTAGE_REQUEST_PAUSE_SECONDS` — default `15` (free-tier rate-limit spacing)
 - `SIGNAL_WEIGHT_*` / `SIGNAL_BUY_THRESHOLD` / `SIGNAL_SELL_THRESHOLD`
 - `BRONZE_PROFILE_FAIL_ON_ERROR` — default `true` (fail the DAG on empty/unparseable bronze)
 - `BRONZE_PROFILE_WARN_MIN_POINTS` — default `5` (spot quotes warn, they do not fail)

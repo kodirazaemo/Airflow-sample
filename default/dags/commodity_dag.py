@@ -22,7 +22,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from airflow.providers.standard.operators.python import PythonOperator
@@ -766,6 +766,21 @@ def combine_weighted_signals(component_signals: dict[str, dict], weights: dict[s
 # Airflow tasks (bronze → silver → gold)
 # ---------------------------------------------------------------------------
 
+def _trading_date(context: dict) -> str:
+    candidates = (
+        context.get('ds'),
+        context.get('logical_date'),
+        context.get('data_interval_start'),
+        getattr(context.get('dag_run'), 'run_after', None),
+    )
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        if isinstance(candidate, str):
+            return candidate[:10]
+        return candidate.strftime('%Y-%m-%d')
+    return datetime.now(timezone.utc).strftime('%Y-%m-%d')
+
 def extract_bronze(**context):
     """
     Bronze extract: persist raw MCP/REST payloads.
@@ -774,7 +789,7 @@ def extract_bronze(**context):
     live call so a later task retry does not re-hit Alpha Vantage.
     """
     init_warehouse()
-    ds = context['ds']
+    ds = _trading_date(context)
     commodities = get_commodities()
     symbols = list(commodities.items())
     pause = _request_pause_seconds()
@@ -837,7 +852,7 @@ def profile_bronze(**context):
     rates warn only so spot-fallback sample runs still complete.
     """
     init_warehouse()
-    ds = context['ds']
+    ds = _trading_date(context)
     commodities = get_commodities()
     profiles = []
     for symbol in commodities:
@@ -867,7 +882,7 @@ def profile_bronze(**context):
 def transform_silver(**context):
     """Silver: validate bronze payloads (schema / nulls) and write cleaned tables."""
     init_warehouse()
-    ds = context['ds']
+    ds = _trading_date(context)
     commodities = get_commodities()
     errors = []
     quotes = {}
@@ -938,7 +953,7 @@ def compute_gold(**context):
     Metrics (min/max/avg/period return) are computed in SQL so a BI tool can
     read gold.commodity_metrics. Indicator scores remain Python functions.
     """
-    ds = context['ds']
+    ds = _trading_date(context)
     quotes = load_silver_quotes(ds)
     if not quotes:
         raise ValueError(f'No silver quotes for {ds}')
@@ -988,7 +1003,7 @@ def compute_gold(**context):
 
 def score_obv_data_quality(**context):
     """Compare synthetic OBV against historical price trend lines; write gold."""
-    ds = context['ds']
+    ds = _trading_date(context)
     quotes = load_silver_quotes(ds)
     scores = {}
     for symbol in quotes:
@@ -1038,7 +1053,7 @@ def generate_trade_orders(**context):
 
 def publish_daily_report(**context):
     """Build a short end-of-day trading summary."""
-    ds = context['ds']
+    ds = _trading_date(context)
     prices = load_silver_quotes(ds)
     signals = context['ti'].xcom_pull(task_ids='compute_gold', key='trading_signals')
     orders = context['ti'].xcom_pull(task_ids='generate_trade_orders', key='trade_orders') or []
@@ -1095,14 +1110,16 @@ def publish_daily_report(**context):
 
 def open_trading_session(**context):
     """Session open marker (replaces BashOperator to avoid shell dependency)."""
-    print(f"Opening commodity trading session for {context['ds']} ({_price_source()})")
-    return {'session': 'open', 'trading_date': context['ds']}
+    trading_date = _trading_date(context)
+    print(f'Opening commodity trading session for {trading_date} ({_price_source()})')
+    return {'session': 'open', 'trading_date': trading_date}
 
 
 def close_trading_session(**context):
     """Session close marker."""
-    print(f"Commodity trading session closed for {context['ds']}")
-    return {'session': 'closed', 'trading_date': context['ds']}
+    trading_date = _trading_date(context)
+    print(f'Commodity trading session closed for {trading_date}')
+    return {'session': 'closed', 'trading_date': trading_date}
 
 
 with DAG(
@@ -1113,8 +1130,9 @@ with DAG(
         'silver quotes, gold SQL metrics, OBV data-quality vs price trend'
     ),
     start_date=datetime(2024, 1, 1),
-    schedule=timedelta(days=1),
+    schedule=timedelta(minutes=2),
     catchup=False,
+    max_active_runs=1,
     tags=['commodity', 'trading', 'alpha-vantage', 'mcp', 'medallion', 'sample'],
 ) as dag:
 
