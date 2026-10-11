@@ -2,6 +2,16 @@
 
 Containerized **Apache Airflow 3.3.1** (Python 3.12) with PostgreSQL, Redis, and sample DAGs. Commodity prices come from the [Alpha Vantage MCP server](https://mcp.alphavantage.co/#connection-examples).
 
+## What this app does
+
+This sample collects prices for gold, WTI crude oil, natural gas, copper, and wheat, then turns the data into a small analytics pipeline:
+
+- `commodity_trading_dag` runs every 2 minutes. It fetches prices, stores the raw responses in Bronze, validates and normalizes them into Silver, and calculates Gold metrics and market signals using momentum, moving averages, RSI, MACD, and OBV.
+- The DAG finishes with a daily-style report and suggested trade orders. These are sample recommendations only; the app does not connect to a broker or place trades.
+- `alpha_vantage_mcp_read` is a manual test DAG that discovers available Alpha Vantage tools and reads a sample WTI series through the local MCP process.
+
+Airflow orchestrates the tasks; PostgreSQL stores Airflow metadata and the Bronze/Silver/Gold tables. A valid Alpha Vantage API key and outbound internet access are needed for live prices.
+
 ## Quick Start
 
 **Prerequisites:** Docker Compose, a free [Alpha Vantage API key](https://www.alphavantage.co/support/#api-key), local Python **3.12+** for tests.
