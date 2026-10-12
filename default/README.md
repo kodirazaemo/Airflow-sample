@@ -20,7 +20,7 @@ Airflow orchestrates the tasks; PostgreSQL stores Airflow metadata and the Bronz
 
 ```bash
 cp .env.example .env
-# Set ALPHA_VANTAGE_API_KEY — never commit .env
+# Set ALPHA_VANTAGE_API_KEY and generate AIRFLOW__CORE__FERNET_KEY (see .env.example) — never commit .env
 docker compose up -d --build
 ```
 
@@ -41,7 +41,7 @@ docker compose down
 | extra `mcp_url` | compose default `https://mcp.alphavantage.co/mcp` |
 | extra `mcp_sse_url` | compose default `https://mcp.alphavantage.co/sse` |
 
-Tasks read the key and extras with `BaseHook.get_connection('alpha_vantage_default')` (metadata DB fallback outside a task; env fallback for unit tests). Compose pins `AIRFLOW__CORE__FERNET_KEY` so every service can decrypt the password.
+Tasks read the key and extras with `BaseHook.get_connection('alpha_vantage_default')` (metadata DB fallback outside a task; env fallback for unit tests). Local compose needs a generated Fernet key in `.env` (`AIRFLOW__CORE__FERNET_KEY`), shared across api-server, scheduler, and dag-processor.
 
 Production: use an Airflow secrets backend. Do not rely on `.env`. The key is never committed; task logs redact `apikey=` query values.
 
