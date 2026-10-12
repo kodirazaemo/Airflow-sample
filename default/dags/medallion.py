@@ -17,7 +17,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Generator
 
 BRONZE_SNAPSHOTS = 'bronze.mcp_snapshots'
 SILVER_QUOTES = 'silver.commodity_quotes'
@@ -70,7 +70,7 @@ def _psycopg_dsn(url: str) -> str:
 
 
 @contextmanager
-def warehouse_connection() -> Iterator[Any]:
+def warehouse_connection() -> Generator[Any, None, None]:
     url = warehouse_url()
     if url and _is_postgres(url):
         import psycopg2
